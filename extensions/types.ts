@@ -13,10 +13,20 @@ export interface RoutingRule {
   reason?: string;
 }
 
+export interface ModelDefinition {
+  model: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+}
+
 export interface RoutedTierConfig {
   model: string;
   thinking?: ThinkingLevel;
   fallbacks?: string[];
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  resolvedContextWindow?: number;
+  resolvedMaxOutputTokens?: number;
 }
 
 export interface RouterProfile {
@@ -30,10 +40,10 @@ export interface RouterConfig {
   debug?: boolean;
   classifierModel?: string;
   phaseBias?: number;
-  largeContextThreshold?: number;
   maxSessionBudget?: number;
   rules?: RoutingRule[];
   profiles: Record<string, RouterProfile>;
+  models?: Record<string, ModelDefinition>;
 }
 
 export interface RoutingDecision {
@@ -48,7 +58,6 @@ export interface RoutingDecision {
   timestamp: number;
   isClassifier?: boolean;
   isFallback?: boolean;
-  isContextTriggered?: boolean;
   isBudgetForced?: boolean;
   isRuleMatched?: boolean;
 }

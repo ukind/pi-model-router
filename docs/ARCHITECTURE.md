@@ -21,12 +21,11 @@ The extension uses `pi.registerProvider` to hook into the `pi` model lifecycle. 
 For every request sent to a `router/*` model, the following logic is executed:
 
 1. **Budget Check**: If a `maxSessionBudget` is configured and the session spend exceeds it, the router automatically downgrades `high` tier requests to `medium`.
-2. **Context Trigger**: If `largeContextThreshold` is exceeded (measured in tokens), the router forces the `high` tier to ensure the model can handle the large context.
-3. **Manual Pin**: If the user has pinned a tier via `/router pin` or `/router fix`, that tier is used.
-4. **Custom Rules**: Keyword-based rules defined in the config are checked against the user prompt.
-5. **LLM Classifier (Optional)**: If `classifierModel` is configured, a fast LLM is called to categorize the user's intent.
-6. **Heuristics (Fallback)**: If the classifier is off or fails, a fast local heuristic (keyword/length/tool-use analysis) is used.
-7. **Biased Stickiness**: The `phaseBias` setting modulates thresholds to keep the router in a consistent phase (e.g., staying in `high` tier during a multi-turn planning session).
+2. **Manual Pin**: If the user has pinned a tier via `/router pin` or `/router fix`, that tier is used.
+3. **Custom Rules**: Keyword-based rules defined in the config are checked against the user prompt.
+4. **LLM Classifier (Optional)**: If `classifierModel` is configured, a fast LLM is called to categorize the user's intent.
+5. **Heuristics (Fallback)**: If the classifier is off or fails, a fast local heuristic (keyword/length/tool-use analysis) is used.
+6. **Biased Stickiness**: The `phaseBias` setting modulates thresholds to keep the router in a consistent phase (e.g., staying in `high` tier during a multi-turn planning session).
 
 ## Module Architecture
 

@@ -10,7 +10,6 @@ Intelligent per-turn model router extension for the [pi-coding-agent](https://gi
 - **Advanced Controls**: Includes built-in support for:
   - **LLM Intent Classifier**: Optionally use a fast model to categorize intent (overrides heuristics).
   - **Custom Rules**: Define keyword-based tier overrides for specific patterns (e.g., `deploy` → `high`).
-  - **Context Trigger**: Automatically upgrade to high-tier when token usage exceeds a threshold.
   - **Cost Budgeting**: Set a session spend limit; high tier downgrades to medium once exceeded.
   - **Fallback Chains**: Automatic retry with alternative models if the primary choice fails.
 - **Phase Memory**: Biased stickiness to keep you in the same tier during multi-turn planning or implementation work.
@@ -70,12 +69,12 @@ Copy the example config to one of:
 | Field                   | Description                                                                       |
 | ----------------------- | --------------------------------------------------------------------------------- |
 | `defaultProfile`        | The profile to use when starting a new session.                                   |
-| `classifierModel`       | (Optional) Model used to categorize intent. If omitted, fast heuristics are used. |
+| `classifierModel`       | (Optional) Model used to categorize intent. Supports model aliases. If omitted, fast heuristics are used. |
 | `maxSessionBudget`      | (Optional) USD budget for the session. Forces `medium` tier once exceeded.        |
-| `largeContextThreshold` | (Optional) Token count trigger to force `high` tier for large contexts.           |
 | `phaseBias`             | (0.0 - 1.0) Stickiness of the current phase. Higher = more stable. Default `0.5`. |
 | `rules`                 | List of custom keyword rules (e.g. `{ "matches": "deploy", "tier": "high" }`).    |
-| `profiles`              | Map of profile definitions, each containing `high`, `medium`, and `low` tiers.    |
+| `models`                | (Optional) Map of model aliases to definitions with `model`, `contextWindow`, `maxOutputTokens`. |
+| `profiles`              | Map of profile definitions, each containing `high`, `medium`, and `low` tiers. Tier models can reference aliases from `models`. |
 
 ## Commands
 

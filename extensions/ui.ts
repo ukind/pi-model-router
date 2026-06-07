@@ -15,7 +15,6 @@ const getEffectiveThinking = (
 const getDecisionFlags = (decision: RoutingDecision): string[] => {
   const flags: string[] = [];
   if (decision.isFallback) flags.push('fallback');
-  if (decision.isContextTriggered) flags.push('context');
   if (decision.isBudgetForced) flags.push('budget-limit');
   if (decision.isRuleMatched) flags.push('rule');
   return flags;

@@ -20,7 +20,11 @@ import type {
   RouterPinByProfile,
   RouterThinkingByProfile,
 } from './types';
-import { profileNames, parseCanonicalModelRef, ROUTER_TIERS } from './config';
+import { profileNames, parseCanonicalModelRef, ROUTER_TIERS, resolveContextWindow, resolveMaxOutputTokens } from './config';
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+} from './constants';
 import {
   phaseForTier,
   buildRoutingDecision,
@@ -151,26 +155,25 @@ export const registerRouterProvider = (
   // Map profiles to their capacities
   const modelDefinitions = profileList.map((name) => {
     const profile = state.currentConfig.profiles[name];
-    let contextWindow = 1_000_000;
-    let maxTokens = 64_000;
 
-    if (state.currentModelRegistry) {
-      for (const tier of ROUTER_TIERS) {
-        try {
-          const { provider, modelId } = parseCanonicalModelRef(
-            profile[tier].model,
-          );
-          const tierModel = state.currentModelRegistry.find(provider, modelId);
-          if (tierModel) {
-            if (tier === 'high') {
-              contextWindow = tierModel.contextWindow ?? contextWindow;
-              maxTokens = tierModel.maxTokens ?? maxTokens;
-            }
-          }
-        } catch (_error) {
-          // ignore
-        }
-      }
+    // Report the MAX context window and max output tokens across all tiers.
+    // The honesty check + truncateContext handles the case where the
+    // actually routed model is smaller.
+    let maxContextWindow = DEFAULT_CONTEXT_WINDOW;
+    let maxMaxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
+    for (const tier of ROUTER_TIERS) {
+      const cw = resolveContextWindow(
+        tier,
+        profile,
+        state.currentModelRegistry,
+      );
+      const mot = resolveMaxOutputTokens(
+        tier,
+        profile,
+        state.currentModelRegistry,
+      );
+      if (cw > maxContextWindow) maxContextWindow = cw;
+      if (mot > maxMaxOutputTokens) maxMaxOutputTokens = mot;
     }
 
     return {
@@ -179,8 +182,8 @@ export const registerRouterProvider = (
       reasoning: supportsReasoning(profile, state.currentModelRegistry),
       input: ['text', 'image'] as ('text' | 'image')[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow,
-      maxTokens,
+      contextWindow: maxContextWindow,
+      maxTokens: maxMaxOutputTokens,
     };
   });
 
@@ -233,39 +236,11 @@ export const registerRouterProvider = (
             isBudgetExceeded,
           );
 
-          // Optional Context Trigger Upgrade
-          if (
-            state.currentConfig.largeContextThreshold &&
-            decision.tier !== 'high' &&
-            state.lastExtensionContext
-          ) {
-            try {
-              const usage = await state.lastExtensionContext.getContextUsage();
-              if (
-                usage?.tokens &&
-                usage.tokens > state.currentConfig.largeContextThreshold
-              ) {
-                decision = buildRoutingDecision(
-                  model.id,
-                  profile,
-                  'high',
-                  'planning',
-                  `Context usage (${usage.tokens}) exceeds threshold (${state.currentConfig.largeContextThreshold}). Forced high tier.`,
-                  state.thinkingByProfile[model.id],
-                  false,
-                );
-                decision.isContextTriggered = true;
-              }
-            } catch (e) {
-              // ignore
-            }
-          }
 
           // Classifier Override
           if (
             state.currentConfig.classifierModel &&
             !pinnedTier &&
-            !decision.isContextTriggered &&
             !decision.isRuleMatched
           ) {
             const classifierResult = await runClassifier(
@@ -432,7 +407,11 @@ export const registerRouterProvider = (
               // HONESTY CHECK & AUTO-TRUNCATION
               // If the picked model has a smaller context than what we reported, truncate now.
               let effectiveContext = context;
-              const targetLimit = targetModel.contextWindow || 128_000;
+              const targetLimit = resolveContextWindow(
+                decision.tier,
+                profile,
+                state.currentModelRegistry,
+              );
               if (targetLimit < model.contextWindow!) {
                 effectiveContext = truncateContext(context, targetLimit);
               }
