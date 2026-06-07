@@ -136,6 +136,7 @@ export const decideRouting = (
     'step by step',
     'think hard',
     'highest quality',
+    'ultrathink',
   ];
   const explicitLowHints = [
     'fast',
