@@ -1,4 +1,5 @@
 import { streamSimple, type Context, type Message } from '@earendil-works/pi-ai';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type {
   RouterTier,
@@ -341,6 +342,7 @@ export const runClassifier = async (
   modelRegistry: ExtensionContext['modelRegistry'],
   context: Context,
   currentPhase?: RouterPhase,
+  thinking?: ThinkingLevel,
 ): Promise<{ tier: RouterTier; reasoning: string } | undefined> => {
   try {
     const { provider, modelId } = parseCanonicalModelRef(classifierModelRef);
@@ -381,7 +383,16 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
       messages: [{ role: 'user', content: classifierPrompt, timestamp: Date.now() }],
     };
 
-    const stream = streamSimple(model, classifierContext, { apiKey, headers });
+    const reasoningOption =
+      model.reasoning && thinking && thinking !== 'off'
+        ? thinking
+        : undefined;
+
+    const stream = streamSimple(model, classifierContext, {
+      apiKey,
+      headers,
+      ...(reasoningOption ? { reasoning: reasoningOption } : {}),
+    });
     let fullText = '';
     for await (const event of stream) {
       if (

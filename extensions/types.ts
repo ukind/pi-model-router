@@ -19,6 +19,11 @@ export interface ModelDefinition {
   maxOutputTokens?: number;
 }
 
+export interface ClassifierConfig {
+  model: string;
+  thinking?: ThinkingLevel;
+}
+
 export interface RoutedTierConfig {
   model: string;
   thinking?: ThinkingLevel;
@@ -38,7 +43,7 @@ export interface RouterProfile {
 export interface RouterConfig {
   defaultProfile?: string;
   debug?: boolean;
-  classifierModel?: string;
+  classifierModel?: ClassifierConfig;
   phaseBias?: number;
   maxSessionBudget?: number;
   rules?: RoutingRule[];

@@ -11,6 +11,7 @@ import type {
   RouterTier,
   RoutingRule,
   ModelDefinition,
+  ClassifierConfig,
 } from './types';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import {
@@ -401,24 +402,47 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
     }
   }
 
-  // Resolve classifierModel alias
-  let classifierModel =
-    typeof raw.classifierModel === 'string'
-      ? raw.classifierModel.trim()
-      : undefined;
-  if (classifierModel) {
+  // Resolve classifierModel — accepts string or { model, thinking } object
+  let classifierModel: ClassifierConfig | undefined;
+  const rawClassifier = raw.classifierModel as unknown;
+  if (typeof rawClassifier === 'string' && rawClassifier.trim()) {
     const resolved = resolveModelRef(
-      classifierModel,
+      rawClassifier.trim(),
       hasModels ? normalizedModels : undefined,
     );
     try {
       parseCanonicalModelRef(resolved.canonicalRef);
-      classifierModel = resolved.canonicalRef;
+      classifierModel = { model: resolved.canonicalRef };
     } catch (error) {
       warnings.push(
         `Invalid classifierModel: ${error instanceof Error ? error.message : String(error)}`,
       );
-      classifierModel = undefined;
+    }
+  } else if (isObjectRecord(rawClassifier)) {
+    const modelRef = typeof rawClassifier.model === 'string' ? rawClassifier.model.trim() : '';
+    if (modelRef) {
+      const resolved = resolveModelRef(
+        modelRef,
+        hasModels ? normalizedModels : undefined,
+      );
+      try {
+        parseCanonicalModelRef(resolved.canonicalRef);
+        const thinking = isThinkingLevel(rawClassifier.thinking)
+          ? rawClassifier.thinking
+          : undefined;
+        if (rawClassifier.thinking !== undefined && !thinking) {
+          warnings.push(
+            `classifierModel has invalid thinking level "${String(rawClassifier.thinking)}". Ignored.`,
+          );
+        }
+        classifierModel = { model: resolved.canonicalRef, thinking };
+      } catch (error) {
+        warnings.push(
+          `Invalid classifierModel: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    } else {
+      warnings.push('classifierModel object is missing the "model" field. Ignored.');
     }
   }
 

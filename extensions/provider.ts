@@ -244,10 +244,11 @@ export const registerRouterProvider = (
             !decision.isRuleMatched
           ) {
             const classifierResult = await runClassifier(
-              state.currentConfig.classifierModel,
+              state.currentConfig.classifierModel.model,
               state.currentModelRegistry,
               context,
               state.lastDecision?.phase,
+              state.currentConfig.classifierModel.thinking,
             );
             if (classifierResult) {
               decision = buildRoutingDecision(
