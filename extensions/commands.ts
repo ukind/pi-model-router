@@ -38,6 +38,7 @@ export const registerCommands = (
     debugEnabled: boolean;
     widgetEnabled: boolean;
     readonly debugHistory: RoutingDecision[];
+    readonly lastConfigWarnings: string[];
   },
   actions: {
     persistState: () => void;
@@ -210,6 +211,13 @@ export const registerCommands = (
         `Last phase: ${state.lastDecision.phase}`,
         `Last model: ${state.lastDecision.targetProvider}/${state.lastDecision.targetModelId} (${state.lastDecision.thinking})`,
         `Reason: ${state.lastDecision.reasoning}`,
+      );
+    }
+    if (state.lastConfigWarnings && state.lastConfigWarnings.length > 0) {
+      lines.push(
+        '',
+        '⚠️ Configuration Warnings:',
+        ...state.lastConfigWarnings.map((w) => `  - ${w}`),
       );
     }
     ctx.ui.notify(lines.join('\n'), 'info');

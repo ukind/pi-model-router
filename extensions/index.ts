@@ -138,6 +138,12 @@ const routerExtension = (pi: ExtensionAPI) => {
       actions.registerRouterProvider();
       if (ctx) {
         actions.updateStatus(ctx);
+        if (lastConfigWarnings.length > 0) {
+          ctx.ui.notify(
+            `Router Configuration Warnings:\n${lastConfigWarnings.join('\n')}`,
+            'warning',
+          );
+        }
       }
     },
     ensureValidActiveRouterProfile: async (ctx: ExtensionContext) => {
@@ -255,7 +261,7 @@ const routerExtension = (pi: ExtensionAPI) => {
     lastExtensionContext = ctx;
     currentModelRegistry = ctx.modelRegistry;
     currentCwd = ctx.cwd;
-    actions.reloadConfig();
+    actions.reloadConfig(ctx);
 
     // Give the registry a moment to synchronize after re-registration
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -383,6 +389,9 @@ const routerExtension = (pi: ExtensionAPI) => {
       },
       get debugHistory() {
         return debugHistory;
+      },
+      get lastConfigWarnings() {
+        return lastConfigWarnings;
       },
     },
     actions,
