@@ -20,11 +20,14 @@ import type {
   RouterPinByProfile,
   RouterThinkingByProfile,
 } from './types';
-import { profileNames, parseCanonicalModelRef, ROUTER_TIERS, resolveContextWindow, resolveMaxOutputTokens } from './config';
 import {
-  DEFAULT_CONTEXT_WINDOW,
-  DEFAULT_MAX_OUTPUT_TOKENS,
-} from './constants';
+  profileNames,
+  parseCanonicalModelRef,
+  ROUTER_TIERS,
+  resolveContextWindow,
+  resolveMaxOutputTokens,
+} from './config';
+import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS } from './constants';
 import {
   phaseForTier,
   buildRoutingDecision,
@@ -182,7 +185,7 @@ export const registerRouterProvider = (
     return {
       id: name,
       name: `Router ${name}`,
-      reasoning: supportsReasoning(profile, state.currentModelRegistry),
+      reasoning: false,
       input: ['text', 'image'] as ('text' | 'image')[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: maxContextWindow,
@@ -238,7 +241,6 @@ export const registerRouterProvider = (
             state.currentConfig.rules,
             isBudgetExceeded,
           );
-
 
           // Classifier Override
           if (
