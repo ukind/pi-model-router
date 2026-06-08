@@ -1,9 +1,10 @@
 {
   "name": "@yeliu84/pi-model-router",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "files": [
     "extensions",
+    "!extensions/*.test.ts",
     "LICENSE",
     "model-router.example.json",
     "README.md"
