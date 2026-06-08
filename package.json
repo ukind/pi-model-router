@@ -21,7 +21,7 @@
   "author": "Ye Liu",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yeliu84/pi-model-router.git"
+    "url": "git+https://github.com/yeliu84/pi-model-router.git"
   },
   "homepage": "https://github.com/yeliu84/pi-model-router#readme",
   "bugs": {
