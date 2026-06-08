@@ -54,7 +54,7 @@ export const formatModelRef = (ref: string | undefined): string => {
 export const updateStatus = (
   ctx: ExtensionContext,
   routerEnabled: boolean,
-  selectedProfile: string,
+  selectedProfile: string | undefined,
   pinnedTierByProfile: RouterPinByProfile,
   thinkingByProfile: RouterThinkingByProfile,
   lastDecision: RoutingDecision | undefined,
@@ -64,8 +64,8 @@ export const updateStatus = (
   currentConfig: RouterConfig,
 ) => {
   const activeRouterProfile = routerEnabled ? selectedProfile : undefined;
-  const statusProfile = selectedProfile;
-  const activePin = pinnedTierByProfile[statusProfile];
+  const statusProfile = selectedProfile ?? 'none';
+  const activePin = selectedProfile ? pinnedTierByProfile[selectedProfile] : undefined;
   const pinLabel = activePin ? ` [pin:${activePin}]` : '';
 
   let statusText: string;

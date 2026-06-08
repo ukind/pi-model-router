@@ -12,7 +12,6 @@ import type {
 } from './types';
 import {
   profileNames,
-  resolveProfileName,
   THINKING_LEVELS,
   ROUTER_PIN_VALUES,
   ROUTER_TIERS,
@@ -30,7 +29,7 @@ export const registerCommands = (
   state: {
     readonly currentConfig: RouterConfig;
     routerEnabled: boolean;
-    selectedProfile: string;
+    selectedProfile: string | undefined;
     readonly pinnedTierByProfile: RouterPinByProfile;
     readonly thinkingByProfile: RouterThinkingByProfile;
     readonly lastDecision: RoutingDecision | undefined;
@@ -190,8 +189,8 @@ export const registerCommands = (
     const lines = [
       'Model Router Status:',
       `Router enabled: ${state.routerEnabled ? 'yes' : 'off'}`,
-      `Selected profile: ${state.selectedProfile}`,
-      `Selected profile pin: ${state.pinnedTierByProfile[state.selectedProfile] ?? 'auto'}`,
+      `Selected profile: ${state.selectedProfile ?? 'none'}`,
+      `Selected profile pin: ${state.selectedProfile ? (state.pinnedTierByProfile[state.selectedProfile] ?? 'auto') : 'none'}`,
       `Pins by profile: ${formatPinSummary(state.pinnedTierByProfile)}`,
       `Thinking overrides: ${formatThinkingSummary(state.thinkingByProfile)}`,
       `Widget: ${state.widgetEnabled ? 'on' : 'off'}`,
@@ -200,7 +199,6 @@ export const registerCommands = (
         (state.currentConfig.maxSessionBudget
           ? ` / $${state.currentConfig.maxSessionBudget.toFixed(2)}`
           : ''),
-      `Default profile: ${resolveProfileName(state.currentConfig, state.currentConfig.defaultProfile)}`,
       `Available profiles: ${names}`,
       `Last non-router model: ${formatModelRef(state.lastNonRouterModel)}`,
       `Debug: ${state.debugEnabled ? 'on' : 'off'}`,
@@ -242,6 +240,10 @@ export const registerCommands = (
 
   const handlePin = async (args: string[], ctx: ExtensionContext) => {
     const currentProfile = state.selectedProfile;
+    if (!currentProfile) {
+      ctx.ui.notify('No router profile is active. Select a router model first.', 'error');
+      return;
+    }
     if (args.length === 0) {
       ctx.ui.notify(
         [
@@ -317,6 +319,10 @@ export const registerCommands = (
 
   const handleThinking = async (args: string[], ctx: ExtensionContext) => {
     const currentProfile = state.selectedProfile;
+    if (!currentProfile) {
+      ctx.ui.notify('No router profile is active. Select a router model first.', 'error');
+      return;
+    }
     if (args.length === 0) {
       ctx.ui.notify(
         [

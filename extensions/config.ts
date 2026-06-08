@@ -21,17 +21,6 @@ import {
 
 export const ROUTER_TIERS = ['high', 'medium', 'low'] as const;
 
-export const FALLBACK_CONFIG: RouterConfig = {
-  defaultProfile: 'auto',
-  debug: false,
-  profiles: {
-    auto: {
-      high: { model: 'openai/gpt-5.4-pro', thinking: 'off' },
-      medium: { model: 'google/gemini-flash-latest', thinking: 'off' },
-      low: { model: 'openai/gpt-5.4-nano', thinking: 'off' },
-    },
-  },
-};
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [
   'off',
@@ -94,6 +83,16 @@ export const resolveModelRef = (
   return { canonicalRef: ref };
 };
 
+const mergeTier = (
+  existing?: RoutedTierConfig,
+  next?: Partial<RoutedTierConfig>,
+): RoutedTierConfig | undefined => {
+  if (!existing && !next) return undefined;
+  if (!next) return existing;
+  if (!existing) return next as RoutedTierConfig;
+  return { ...existing, ...next };
+};
+
 export const mergeConfig = (
   base: RouterConfig,
   override: Partial<RouterConfig>,
@@ -103,18 +102,9 @@ export const mergeConfig = (
     const existing = mergedProfiles[name];
     const nextProfile = profile as Partial<RouterProfile>;
     mergedProfiles[name] = {
-      high: {
-        ...(existing?.high ?? FALLBACK_CONFIG.profiles.auto.high),
-        ...(nextProfile.high ?? {}),
-      },
-      medium: {
-        ...(existing?.medium ?? FALLBACK_CONFIG.profiles.auto.medium),
-        ...(nextProfile.medium ?? {}),
-      },
-      low: {
-        ...(existing?.low ?? FALLBACK_CONFIG.profiles.auto.low),
-        ...(nextProfile.low ?? {}),
-      },
+      high: mergeTier(existing?.high, nextProfile.high),
+      medium: mergeTier(existing?.medium, nextProfile.medium),
+      low: mergeTier(existing?.low, nextProfile.low),
     };
   }
 
@@ -124,7 +114,6 @@ export const mergeConfig = (
   };
 
   return {
-    defaultProfile: override.defaultProfile ?? base.defaultProfile,
     debug: override.debug ?? base.debug,
     classifierModel: override.classifierModel ?? base.classifierModel,
     phaseBias: override.phaseBias ?? base.phaseBias,
@@ -213,45 +202,45 @@ export const normalizeModelsMap = (
 
 export const normalizeTierConfig = (
   value: unknown,
-  fallback: RoutedTierConfig,
   profileName: string,
   tier: RouterTier,
   warnings: string[],
   models?: Record<string, ModelDefinition>,
-): RoutedTierConfig => {
+): RoutedTierConfig | undefined => {
   if (!isObjectRecord(value)) {
-    warnings.push(
-      `Profile "${profileName}" has invalid ${tier} tier config. Falling back to ${fallback.model}.`,
-    );
-    return { ...fallback };
+    return undefined;
   }
 
   const rawModel = typeof value.model === 'string' ? value.model.trim() : '';
-  let parsedModel = fallback.model;
   let aliasDefinition: ModelDefinition | undefined;
 
   if (!rawModel) {
     warnings.push(
-      `Profile "${profileName}" ${tier} tier is missing a model. Falling back to ${fallback.model}.`,
+      `Profile "${profileName}" ${tier} tier is missing a model. Tier disabled.`,
     );
-  } else {
-    // Try to resolve as an alias first
-    const resolved = resolveModelRef(rawModel, models);
-    aliasDefinition = resolved.definition;
-    try {
-      parseCanonicalModelRef(resolved.canonicalRef);
-      parsedModel = resolved.canonicalRef;
-    } catch (error) {
-      warnings.push(error instanceof Error ? error.message : String(error));
-    }
+    return undefined;
+  }
+
+  // Try to resolve as an alias first
+  const resolved = resolveModelRef(rawModel, models);
+  aliasDefinition = resolved.definition;
+  let parsedModel: string;
+  try {
+    parseCanonicalModelRef(resolved.canonicalRef);
+    parsedModel = resolved.canonicalRef;
+  } catch (error) {
+    warnings.push(
+      `Profile "${profileName}" ${tier} tier: ${error instanceof Error ? error.message : String(error)} Tier disabled.`,
+    );
+    return undefined;
   }
 
   const thinking = isThinkingLevel(value.thinking)
     ? value.thinking
-    : fallback.thinking;
+    : 'medium';
   if (value.thinking !== undefined && !isThinkingLevel(value.thinking)) {
     warnings.push(
-      `Profile "${profileName}" ${tier} tier has invalid thinking level. Falling back to ${fallback.thinking ?? 'medium'}.`,
+      `Profile "${profileName}" ${tier} tier has invalid thinking level. Defaulting to medium.`,
     );
   }
 
@@ -312,60 +301,38 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
   const hasModels = Object.keys(normalizedModels).length > 0;
 
   const normalizedProfiles: Record<string, RouterProfile> = {};
-  const fallbackAuto = FALLBACK_CONFIG.profiles.auto;
 
   for (const [name, profile] of Object.entries(raw.profiles ?? {})) {
-    normalizedProfiles[name] = {
-      high: normalizeTierConfig(
-        profile?.high,
-        fallbackAuto.high,
-        name,
-        'high',
-        warnings,
-        hasModels ? normalizedModels : undefined,
-      ),
-      medium: normalizeTierConfig(
-        profile?.medium,
-        fallbackAuto.medium,
-        name,
-        'medium',
-        warnings,
-        hasModels ? normalizedModels : undefined,
-      ),
-      low: normalizeTierConfig(
-        profile?.low,
-        fallbackAuto.low,
-        name,
-        'low',
-        warnings,
-        hasModels ? normalizedModels : undefined,
-      ),
-    };
-  }
-
-  if (Object.keys(normalizedProfiles).length === 0) {
-    normalizedProfiles.auto = fallbackAuto;
-    warnings.push(
-      'No valid router profiles found. Falling back to the built-in auto profile.',
+    const high = normalizeTierConfig(
+      profile?.high,
+      name,
+      'high',
+      warnings,
+      hasModels ? normalizedModels : undefined,
     );
-  }
+    const medium = normalizeTierConfig(
+      profile?.medium,
+      name,
+      'medium',
+      warnings,
+      hasModels ? normalizedModels : undefined,
+    );
+    const low = normalizeTierConfig(
+      profile?.low,
+      name,
+      'low',
+      warnings,
+      hasModels ? normalizedModels : undefined,
+    );
 
-  let defaultProfile =
-    typeof raw.defaultProfile === 'string' && raw.defaultProfile.trim()
-      ? raw.defaultProfile.trim()
-      : undefined;
-  if (!defaultProfile || !normalizedProfiles[defaultProfile]) {
-    const fallbackProfile = normalizedProfiles[
-      FALLBACK_CONFIG.defaultProfile ?? 'auto'
-    ]
-      ? (FALLBACK_CONFIG.defaultProfile ?? 'auto')
-      : Object.keys(normalizedProfiles).sort()[0];
-    if (defaultProfile && !normalizedProfiles[defaultProfile]) {
+    if (!high && !medium && !low) {
       warnings.push(
-        `Default router profile "${defaultProfile}" was not found. Falling back to "${fallbackProfile}".`,
+        `Profile "${name}" has no valid tiers. Skipped.`,
       );
+      continue;
     }
-    defaultProfile = fallbackProfile;
+
+    normalizedProfiles[name] = { high, medium, low };
   }
 
   const phaseBias =
@@ -448,7 +415,6 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
 
   return {
     config: {
-      defaultProfile,
       debug: typeof raw.debug === 'boolean' ? raw.debug : false,
       classifierModel,
       phaseBias,
@@ -466,8 +432,9 @@ export const loadRouterConfig = (cwd: string): ConfigLoadResult => {
   const projectPath = join(cwd, '.pi', 'model-router.json');
   const globalResult = parseConfigFile(globalPath);
   const projectResult = parseConfigFile(projectPath);
+  const baseConfig: RouterConfig = { profiles: {} };
   const merged = mergeConfig(
-    mergeConfig(FALLBACK_CONFIG, globalResult.config),
+    mergeConfig(baseConfig, globalResult.config),
     projectResult.config,
   );
   const normalized = normalizeConfig(merged);
@@ -488,14 +455,11 @@ export const profileNames = (config: RouterConfig): string[] => {
 export const resolveProfileName = (
   config: RouterConfig,
   requested?: string,
-): string => {
+): string | undefined => {
   if (requested && config.profiles[requested]) {
     return requested;
   }
-  if (config.defaultProfile && config.profiles[config.defaultProfile]) {
-    return config.defaultProfile;
-  }
-  return profileNames(config)[0] ?? 'auto';
+  return undefined;
 };
 
 /**
@@ -510,6 +474,7 @@ export const resolveContextWindow = (
   modelRegistry: ExtensionContext['modelRegistry'] | undefined,
 ): number => {
   const tierConfig = profile[tier];
+  if (!tierConfig) return DEFAULT_CONTEXT_WINDOW;
 
   // 1. API value (highest priority)
   if (modelRegistry) {
@@ -536,6 +501,7 @@ export const resolveMaxOutputTokens = (
   modelRegistry: ExtensionContext['modelRegistry'] | undefined,
 ): number => {
   const tierConfig = profile[tier];
+  if (!tierConfig) return DEFAULT_MAX_OUTPUT_TOKENS;
 
   // 1. API value (highest priority)
   if (modelRegistry) {

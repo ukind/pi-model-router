@@ -1,12 +1,12 @@
 # Architecture: Pi Model Router Extension
 
-The `pi-model-router` is an extension-first model router for the `pi` coding agent. It registers a custom logical provider (`router`) that exposes "profiles" as models (e.g., `router/auto`). For every turn, the router intelligently selects an underlying concrete model based on task complexity, conversation phase, and user-defined rules.
+The `pi-model-router` is an extension-first model router for the `pi` coding agent. It registers a custom logical provider (`router`) that exposes "profiles" as models (e.g., `router/balanced`). For every turn, the router intelligently selects an underlying concrete model based on task complexity, conversation phase, and user-defined rules.
 
 ## Core Concepts
 
 ### 1. Profiles & Tiers
 
-The router is organized into **Profiles** (e.g., `auto`, `cheap`, `deep`). Each profile defines three **Tiers**:
+The router is organized into **Profiles** (e.g., `balanced`, `cheap`, `deep`). Each profile defines up to three **Tiers** (at least one required):
 
 - **High**: Reserved for architecture, design, complex debugging, and planning. Uses high-reasoning models.
 - **Medium**: The default for standard implementation, multi-file edits, and focused fixes.
@@ -14,7 +14,7 @@ The router is organized into **Profiles** (e.g., `auto`, `cheap`, `deep`). Each 
 
 ### 2. Custom Provider Implementation
 
-The extension uses `pi.registerProvider` to hook into the `pi` model lifecycle. This ensures that the selected model in the `pi` footer remains stable (e.g., `router/auto`) while the underlying model changes transparently turn-by-turn via the `streamSimple` interception.
+The extension uses `pi.registerProvider` to hook into the `pi` model lifecycle. This ensures that the selected model in the `pi` footer remains stable (e.g., `router/balanced`) while the underlying model changes transparently turn-by-turn via the `streamSimple` interception.
 
 ## Routing Decision Flow
 

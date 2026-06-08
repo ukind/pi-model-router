@@ -78,6 +78,24 @@ export const phaseForTier = (tier: RouterTier): RouterPhase => {
   return 'lightweight';
 };
 
+export const resolveAvailableTier = (
+  profile: RouterProfile,
+  preferred: RouterTier,
+): RouterTier => {
+  if (profile[preferred]) return preferred;
+  // Fall "up": low → medium → high
+  const order: RouterTier[] = ['low', 'medium', 'high'];
+  const startIdx = order.indexOf(preferred);
+  for (let i = startIdx + 1; i < order.length; i++) {
+    if (profile[order[i]]) return order[i];
+  }
+  // Fall "down" as last resort
+  for (let i = startIdx - 1; i >= 0; i--) {
+    if (profile[order[i]]) return order[i];
+  }
+  return preferred; // unreachable if profile has ≥1 tier
+};
+
 export const buildRoutingDecision = (
   profileName: string,
   profile: RouterProfile,
@@ -88,6 +106,9 @@ export const buildRoutingDecision = (
   isClassifier?: boolean,
 ): RoutingDecision => {
   const routed = profile[tier];
+  if (!routed) {
+    throw new Error(`Profile "${profileName}" has no configuration for the ${tier} tier.`);
+  }
   const { provider, modelId } = parseCanonicalModelRef(routed.model);
   const baseThinking =
     routed.thinking ??
@@ -322,6 +343,14 @@ export const decideRouting = (
     phase = 'implementation';
     reasoning = `Budget exceeded. Downgraded from high to medium tier. (Original: ${reasoning})`;
     isBudgetForced = true;
+  }
+
+  // Resolve to nearest available tier if the selected tier is disabled
+  const resolvedTier = resolveAvailableTier(profile, tier);
+  if (resolvedTier !== tier) {
+    reasoning = `Resolved from ${tier} to ${resolvedTier} tier (${tier} tier is not configured). Original: ${reasoning}`;
+    phase = phaseForTier(resolvedTier);
+    tier = resolvedTier;
   }
 
   const decision = buildRoutingDecision(
