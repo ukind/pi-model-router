@@ -80,7 +80,8 @@ export const updateStatus = (
         activeRouterProfile,
         lastDecision,
       );
-      statusText = `router:${activeRouterProfile}${pinLabel} -> ${lastDecision.tier} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`;
+      const pinnedStar = activePin ? ' *' : '';
+      statusText = `router:${activeRouterProfile}${pinLabel} -> ${lastDecision.tier}${pinnedStar} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`;
     } else {
       statusText = `router:${activeRouterProfile}${pinLabel} -> waiting`;
     }
@@ -111,9 +112,10 @@ export const updateStatus = (
     );
     const flags = getDecisionFlags(lastDecision);
     const flagsStr = flags.length > 0 ? ` [${flags.join(',')}]` : '';
+    const pinnedStar = pinnedTierByProfile[statusProfile] ? ' *' : '';
 
     widgetLines.push(
-      `Route: ${lastDecision.tier}${flagsStr} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`,
+      `Route: ${lastDecision.tier}${pinnedStar}${flagsStr} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`,
       `Phase: ${lastDecision.phase}`,
     );
   } else if (!routerEnabled && lastNonRouterModel) {
