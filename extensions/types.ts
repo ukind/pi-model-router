@@ -35,13 +35,12 @@ export interface RoutedTierConfig {
 }
 
 export interface RouterProfile {
-  high: RoutedTierConfig;
-  medium: RoutedTierConfig;
-  low: RoutedTierConfig;
+  high?: RoutedTierConfig;
+  medium?: RoutedTierConfig;
+  low?: RoutedTierConfig;
 }
 
 export interface RouterConfig {
-  defaultProfile?: string;
   debug?: boolean;
   classifierModel?: ClassifierConfig;
   phaseBias?: number;

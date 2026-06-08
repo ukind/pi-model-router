@@ -114,8 +114,10 @@ const supportsReasoning = (
   if (!modelRegistry) return false;
 
   for (const tier of ROUTER_TIERS) {
+    const tierConfig = profile[tier];
+    if (!tierConfig) continue;
     try {
-      const { provider, modelId } = parseCanonicalModelRef(profile[tier].model);
+      const { provider, modelId } = parseCanonicalModelRef(tierConfig.model);
       if (modelRegistry.find(provider, modelId)?.reasoning) {
         return true;
       }
@@ -136,7 +138,7 @@ export const registerRouterProvider = (
       | ExtensionContext['modelRegistry']
       | undefined;
     readonly lastExtensionContext: ExtensionContext | undefined;
-    selectedProfile: string;
+    selectedProfile: string | undefined;
     routerEnabled: boolean;
     lastDecision: RoutingDecision | undefined;
     readonly thinkingByProfile: RouterThinkingByProfile;
@@ -162,6 +164,7 @@ export const registerRouterProvider = (
     let maxContextWindow = DEFAULT_CONTEXT_WINDOW;
     let maxMaxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
     for (const tier of ROUTER_TIERS) {
+      if (!profile[tier]) continue;
       const cw = resolveContextWindow(
         tier,
         profile,
@@ -309,7 +312,7 @@ export const registerRouterProvider = (
 
             const tierModels = [
               decision.targetLabel,
-              ...(profile[decision.tier].fallbacks ?? []),
+              ...(profile[decision.tier]?.fallbacks ?? []),
             ];
             if (!tierModels.some(checkModelSupportsImage)) {
               const tiersToTry: RouterTier[] =
@@ -322,9 +325,9 @@ export const registerRouterProvider = (
               let foundTier: RouterTier | undefined;
               for (const t of tiersToTry) {
                 const tModels = [
-                  profile[t].model,
-                  ...(profile[t].fallbacks ?? []),
-                ];
+                  profile[t]?.model,
+                  ...(profile[t]?.fallbacks ?? []),
+                ].filter((m): m is string => typeof m === 'string');
                 if (tModels.some(checkModelSupportsImage)) {
                   foundTier = t;
                   break;
@@ -354,7 +357,7 @@ export const registerRouterProvider = (
 
           let modelsToTry = [
             decision.targetLabel,
-            ...(profile[decision.tier].fallbacks ?? []),
+            ...(profile[decision.tier]?.fallbacks ?? []),
           ];
           if (imageAttached) {
             modelsToTry = modelsToTry.filter((modelRef) => {

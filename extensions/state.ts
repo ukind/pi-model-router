@@ -21,7 +21,7 @@ export const isRouterPersistedState = (
 
 export const buildPersistedState = (
   routerEnabled: boolean,
-  selectedProfile: string,
+  selectedProfile: string | undefined,
   pinnedTierByProfile: RouterPinByProfile,
   thinkingByProfile: RouterThinkingByProfile,
   debugEnabled: boolean,
@@ -33,8 +33,8 @@ export const buildPersistedState = (
 ): RouterPersistedState => {
   return {
     enabled: routerEnabled,
-    selectedProfile,
-    pinTier: pinnedTierByProfile[selectedProfile],
+    selectedProfile: selectedProfile ?? '',
+    pinTier: selectedProfile ? pinnedTierByProfile[selectedProfile] : undefined,
     pinByProfile: { ...pinnedTierByProfile },
     thinkingByProfile: { ...thinkingByProfile },
     debugEnabled,

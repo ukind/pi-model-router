@@ -12,7 +12,6 @@ import type {
 } from './types';
 import {
   profileNames,
-  resolveProfileName,
   THINKING_LEVELS,
   ROUTER_PIN_VALUES,
   ROUTER_TIERS,
@@ -30,7 +29,7 @@ export const registerCommands = (
   state: {
     readonly currentConfig: RouterConfig;
     routerEnabled: boolean;
-    selectedProfile: string;
+    selectedProfile: string | undefined;
     readonly pinnedTierByProfile: RouterPinByProfile;
     readonly thinkingByProfile: RouterThinkingByProfile;
     readonly lastDecision: RoutingDecision | undefined;
@@ -39,6 +38,7 @@ export const registerCommands = (
     debugEnabled: boolean;
     widgetEnabled: boolean;
     readonly debugHistory: RoutingDecision[];
+    readonly lastConfigWarnings: string[];
   },
   actions: {
     persistState: () => void;
@@ -93,10 +93,17 @@ export const registerCommands = (
       ).map((value) => ({
         value,
         label: value,
+        description: value === 'auto'
+          ? 'Restore auto-routing (clear pin) for the active profile'
+          : `Pin active profile to ${value} tier`,
       }));
       const profileItems = profileNames(state.currentConfig)
         .filter((name) => name.startsWith(token))
-        .map((name) => ({ value: name, label: `router/${name}` }));
+        .map((name) => ({
+          value: name,
+          label: `router/${name}`,
+          description: `Configure pinning for profile "${name}"`,
+        }));
       const items = [...pinItems, ...profileItems];
       return items.length > 0 ? items : null;
     }
@@ -111,6 +118,9 @@ export const registerCommands = (
     ).map((value) => ({
       value: `${profileToken} ${value}`,
       label: `${profileToken} ${value}`,
+      description: value === 'auto'
+        ? `Restore auto-routing (clear pin) for profile "${profileToken}"`
+        : `Pin profile "${profileToken}" to ${value} tier`,
     }));
     return items.length > 0 ? items : null;
   };
@@ -127,13 +137,27 @@ export const registerCommands = (
       return [
         ...levelValues
           .filter((v) => v.startsWith(token))
-          .map((v) => ({ value: v, label: v })),
+          .map((v) => ({
+            value: v,
+            label: v,
+            description: v === 'auto'
+              ? 'Restore default thinking level'
+              : `Set thinking level to ${v}`,
+          })),
         ...tierValues
           .filter((v) => v.startsWith(token))
-          .map((v) => ({ value: v, label: v })),
+          .map((v) => ({
+            value: v,
+            label: v,
+            description: `Override thinking for ${v} tier`,
+          })),
         ...profileNames(state.currentConfig)
           .filter((name) => name.startsWith(token))
-          .map((name) => ({ value: name, label: `router/${name}` })),
+          .map((name) => ({
+            value: name,
+            label: `router/${name}`,
+            description: `Override thinking for profile "${name}"`,
+          })),
       ];
     }
 
@@ -146,7 +170,13 @@ export const registerCommands = (
       const levelPrefix = args[1] ?? '';
       return levelValues
         .filter((v) => v.startsWith(levelPrefix))
-        .map((v) => ({ value: `${tier} ${v}`, label: `${tier} ${v}` }));
+        .map((v) => ({
+          value: `${tier} ${v}`,
+          label: `${tier} ${v}`,
+          description: v === 'auto'
+            ? `Restore default thinking level for ${tier} tier`
+            : `Set thinking level to ${v} for ${tier} tier`,
+        }));
     }
 
     if (state.currentConfig.profiles[args[0]]) {
@@ -157,10 +187,20 @@ export const registerCommands = (
         return [
           ...tierValues
             .filter((v) => v.startsWith(nextPrefix))
-            .map((v) => ({ value: `${profile} ${v}`, label: v })),
+            .map((v) => ({
+              value: `${profile} ${v}`,
+              label: v,
+              description: `Override thinking for profile "${profile}" ${v} tier`,
+            })),
           ...levelValues
             .filter((v) => v.startsWith(nextPrefix))
-            .map((v) => ({ value: `${profile} ${v}`, label: v })),
+            .map((v) => ({
+              value: `${profile} ${v}`,
+              label: v,
+              description: v === 'auto'
+                ? `Restore default thinking for all tiers of profile "${profile}"`
+                : `Set thinking to ${v} for all tiers of profile "${profile}"`,
+            })),
         ];
       }
 
@@ -173,7 +213,13 @@ export const registerCommands = (
         const levelPrefix = args[2] ?? '';
         return levelValues
           .filter((v) => v.startsWith(levelPrefix))
-          .map((v) => ({ value: `${profile} ${tier} ${v}`, label: v }));
+          .map((v) => ({
+            value: `${profile} ${tier} ${v}`,
+            label: v,
+            description: v === 'auto'
+              ? `Restore default thinking for profile "${profile}" ${tier} tier`
+              : `Set thinking to ${v} for profile "${profile}" ${tier} tier`,
+          }));
       }
     }
 
@@ -190,8 +236,8 @@ export const registerCommands = (
     const lines = [
       'Model Router Status:',
       `Router enabled: ${state.routerEnabled ? 'yes' : 'off'}`,
-      `Selected profile: ${state.selectedProfile}`,
-      `Selected profile pin: ${state.pinnedTierByProfile[state.selectedProfile] ?? 'auto'}`,
+      `Selected profile: ${state.selectedProfile ?? 'none'}`,
+      `Selected profile pin: ${state.selectedProfile ? (state.pinnedTierByProfile[state.selectedProfile] ?? 'auto') : 'none'}`,
       `Pins by profile: ${formatPinSummary(state.pinnedTierByProfile)}`,
       `Thinking overrides: ${formatThinkingSummary(state.thinkingByProfile)}`,
       `Widget: ${state.widgetEnabled ? 'on' : 'off'}`,
@@ -200,7 +246,6 @@ export const registerCommands = (
         (state.currentConfig.maxSessionBudget
           ? ` / $${state.currentConfig.maxSessionBudget.toFixed(2)}`
           : ''),
-      `Default profile: ${resolveProfileName(state.currentConfig, state.currentConfig.defaultProfile)}`,
       `Available profiles: ${names}`,
       `Last non-router model: ${formatModelRef(state.lastNonRouterModel)}`,
       `Debug: ${state.debugEnabled ? 'on' : 'off'}`,
@@ -212,6 +257,13 @@ export const registerCommands = (
         `Last phase: ${state.lastDecision.phase}`,
         `Last model: ${state.lastDecision.targetProvider}/${state.lastDecision.targetModelId} (${state.lastDecision.thinking})`,
         `Reason: ${state.lastDecision.reasoning}`,
+      );
+    }
+    if (state.lastConfigWarnings && state.lastConfigWarnings.length > 0) {
+      lines.push(
+        '',
+        '⚠️ Configuration Warnings:',
+        ...state.lastConfigWarnings.map((w) => `  - ${w}`),
       );
     }
     ctx.ui.notify(lines.join('\n'), 'info');
@@ -242,6 +294,10 @@ export const registerCommands = (
 
   const handlePin = async (args: string[], ctx: ExtensionContext) => {
     const currentProfile = state.selectedProfile;
+    if (!currentProfile) {
+      ctx.ui.notify('No router profile is active. Select a router model first.', 'error');
+      return;
+    }
     if (args.length === 0) {
       ctx.ui.notify(
         [
@@ -317,6 +373,10 @@ export const registerCommands = (
 
   const handleThinking = async (args: string[], ctx: ExtensionContext) => {
     const currentProfile = state.selectedProfile;
+    if (!currentProfile) {
+      ctx.ui.notify('No router profile is active. Select a router model first.', 'error');
+      return;
+    }
     if (args.length === 0) {
       ctx.ui.notify(
         [
@@ -581,7 +641,7 @@ export const registerCommands = (
             completions?.map((c) => ({
               ...c,
               value: `pin ${c.value}`,
-              description: `Pin profile to ${c.label}`,
+              description: c.description ?? `Pin routing to ${c.label}`,
             })) ?? null
           );
         }
@@ -591,7 +651,7 @@ export const registerCommands = (
             completions?.map((c) => ({
               ...c,
               value: `thinking ${c.value}`,
-              description: `Set thinking level to ${c.label}`,
+              description: c.description ?? `Set thinking level to ${c.label}`,
             })) ?? null
           );
         }

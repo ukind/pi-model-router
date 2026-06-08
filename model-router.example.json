@@ -1,5 +1,4 @@
 {
-  "defaultProfile": "auto",
   "debug": false,
   "classifierModel": "flash",
   "phaseBias": 0.5,
