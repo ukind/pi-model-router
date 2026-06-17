@@ -2,6 +2,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import {
   type RouterConfig,
   type RouterPersistedState,
@@ -16,6 +17,7 @@ import {
   profileNames,
   resolveProfileName,
   parseCanonicalModelRef,
+  ROUTER_TIERS,
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
 import { isRouterPersistedState, buildPersistedState } from './state';
@@ -43,6 +45,7 @@ const routerExtension = (pi: ExtensionAPI) => {
   let lastPersistedSnapshot: string | undefined;
   let isInitialized = false;
   let isInternalModelSwitch = false;
+  let isInternalThinkingChange = false;
 
   const setModelInternally = async (
     model: NonNullable<ExtensionContext['model']>,
@@ -52,6 +55,15 @@ const routerExtension = (pi: ExtensionAPI) => {
       return await pi.setModel(model);
     } finally {
       isInternalModelSwitch = false;
+    }
+  };
+
+  const setThinkingLevelInternally = (level: ThinkingLevel) => {
+    isInternalThinkingChange = true;
+    try {
+      pi.setThinkingLevel(level);
+    } finally {
+      isInternalThinkingChange = false;
     }
   };
 
@@ -250,6 +262,7 @@ const routerExtension = (pi: ExtensionAPI) => {
           recordDebugDecision,
           getThinkingOverride,
           updateStatus: actions.updateStatus,
+          syncPiThinkingLevel: setThinkingLevelInternally,
         },
       );
     },
@@ -317,6 +330,7 @@ const routerExtension = (pi: ExtensionAPI) => {
         : [];
       lastNonRouterModel = savedState.lastNonRouterModel ?? lastNonRouterModel;
       accumulatedCost = savedState.accumulatedCost ?? 0;
+      lastDecision = savedState.lastDecision;
     }
 
     await actions.ensureValidActiveRouterProfile(ctx);
@@ -331,6 +345,9 @@ const routerExtension = (pi: ExtensionAPI) => {
             'warning',
           );
           routerEnabled = false;
+        } else if (lastDecision) {
+          // Sync pi's thinking level display with the router's last decision
+          setThinkingLevelInternally(lastDecision.thinking);
         }
       } else {
         ctx.ui.notify(
@@ -453,6 +470,27 @@ const routerExtension = (pi: ExtensionAPI) => {
     }
     persistState();
     actions.updateStatus(ctx);
+  });
+
+  pi.on('thinking_level_select', (event, ctx) => {
+    if (!isInitialized || !routerEnabled || !selectedProfile) return;
+    if (isInternalThinkingChange) return;
+
+    // User changed pi's thinking level (e.g. via shift+tab).
+    // Apply as an all-tier thinking override for the active router profile.
+    if (!thinkingByProfile[selectedProfile]) {
+      thinkingByProfile[selectedProfile] = {};
+    }
+    for (const t of ROUTER_TIERS) {
+      thinkingByProfile[selectedProfile]![t] = event.level;
+    }
+    persistState();
+    actions.updateStatus(ctx);
+    ctx.ui.notify(
+      `Router thinking for ${selectedProfile} (all tiers) set to ${event.level}. ` +
+        `Use /router thinking auto to restore defaults.`,
+      'info',
+    );
   });
 };
 

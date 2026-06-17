@@ -405,11 +405,7 @@ export const registerCommands = (
 
     if (args.length === 1) {
       levelValue = args[0];
-      tier =
-        state.pinnedTierByProfile[profileName] ??
-        (state.lastDecision?.profile === profileName
-          ? state.lastDecision.tier
-          : 'medium');
+      tier = 'all';
     } else if (args.length === 2) {
       if (tierValues.includes(args[0]) || args[0] === 'all') {
         tier = args[0] as RouterTier | 'all';
@@ -417,11 +413,7 @@ export const registerCommands = (
       } else {
         profileName = args[0];
         levelValue = args[1];
-        tier =
-          state.pinnedTierByProfile[profileName] ??
-          (state.lastDecision?.profile === profileName
-            ? state.lastDecision.tier
-            : 'medium');
+        tier = 'all';
       }
     } else if (args.length === 3) {
       profileName = args[0];

@@ -13,6 +13,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type {
   RouterConfig,
   RoutingDecision,
@@ -153,6 +154,7 @@ export const registerRouterProvider = (
     recordDebugDecision: (decision: RoutingDecision) => void;
     getThinkingOverride: (profileName: string, tier: RouterTier) => any;
     updateStatus: (ctx: ExtensionContext) => void;
+    syncPiThinkingLevel: (level: ThinkingLevel) => void;
   },
 ) => {
   const profileList = profileNames(state.currentConfig);
@@ -352,6 +354,12 @@ export const registerRouterProvider = (
 
           state.lastDecision = decision;
           actions.recordDebugDecision(decision);
+
+          // Sync pi's thinking level display with the router's effective thinking
+          const effectiveThinking =
+            actions.getThinkingOverride(model.id, decision.tier) ??
+            decision.thinking;
+          actions.syncPiThinkingLevel(effectiveThinking);
 
           if (state.lastExtensionContext) {
             actions.updateStatus(state.lastExtensionContext);

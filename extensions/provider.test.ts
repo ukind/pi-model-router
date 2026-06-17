@@ -113,6 +113,7 @@ describe('provider.ts', () => {
       recordDebugDecision: vi.fn(),
       getThinkingOverride: vi.fn().mockReturnValue(undefined),
       updateStatus: vi.fn(),
+      syncPiThinkingLevel: vi.fn(),
     };
   });
 
