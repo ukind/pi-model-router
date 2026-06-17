@@ -382,9 +382,10 @@ export const registerCommands = (
         [
           `Profile: ${currentProfile}`,
           `Thinking overrides: ${JSON.stringify(state.thinkingByProfile[currentProfile] ?? {})}`,
-          'Usage: /router thinking <level|auto>',
-          '   or: /router thinking <tier> <level|auto>',
+          'Usage: /router thinking <level|auto>           (applies to all tiers)',
+          '   or: /router thinking <tier> <level|auto>    (applies to one tier)',
           '   or: /router thinking <profile> <tier> <level|auto>',
+          'Note: not all tier models may support every thinking level.',
         ].join('\n'),
         'info',
       );
