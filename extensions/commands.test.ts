@@ -142,7 +142,7 @@ describe('commands.ts', () => {
       const values = completions.map((c: any) => c.value);
       expect(values).toContain('pin auto');
       expect(values).toContain('pin high');
-      expect(values).toContain('pin balanced');
+      expect(values).not.toContain('pin balanced');
     });
   });
 
@@ -195,7 +195,7 @@ describe('commands.ts', () => {
       expect(actions.persistState).toHaveBeenCalled();
       expect(actions.updateStatus).toHaveBeenCalledWith(ctx);
       expect(ctx.ui.notify).toHaveBeenCalledWith(
-        'Router profile balanced pinned to high',
+        'Router pinned to high',
         'info',
       );
 
