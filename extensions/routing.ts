@@ -245,7 +245,8 @@ export const decideRouting = (
         const matches = Array.isArray(rule.matches)
           ? rule.matches
           : [rule.matches];
-        if (containsAny(prompt, matches)) {
+        const lowercaseMatches = matches.map((m) => m.toLowerCase());
+        if (containsAny(prompt, lowercaseMatches)) {
           tier = rule.tier;
           phase = phaseForTier(tier);
           reasoning =

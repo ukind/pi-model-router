@@ -270,6 +270,34 @@ describe('routing.ts', () => {
       expect(decision.reasoning).toBe('High rule');
     });
 
+    it('should match custom rule case-insensitively', () => {
+      const rulesWithCapitalCase = [
+        { matches: 'Force-High', tier: 'high' as const, reason: 'High rule' },
+      ];
+      const context: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: 'Please force-high model',
+            timestamp: Date.now(),
+          },
+        ],
+      };
+      const decision = decideRouting(
+        context,
+        'p',
+        profile,
+        undefined,
+        undefined,
+        undefined,
+        0.5,
+        rulesWithCapitalCase,
+      );
+      expect(decision.tier).toBe('high');
+      expect(decision.isRuleMatched).toBe(true);
+      expect(decision.reasoning).toBe('High rule');
+    });
+
     it('should route explicit high/low hints', () => {
       const contextHigh: Context = {
         messages: [
