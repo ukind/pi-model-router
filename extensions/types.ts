@@ -17,6 +17,8 @@ export interface ModelDefinition {
   model: string;
   contextWindow?: number;
   maxOutputTokens?: number;
+  reasoning?: boolean;
+  thinkingLevels?: ThinkingLevel[];
 }
 
 export interface ClassifierConfig {
@@ -30,8 +32,11 @@ export interface RoutedTierConfig {
   fallbacks?: string[];
   contextWindow?: number;
   maxOutputTokens?: number;
+  reasoning?: boolean;
+  thinkingLevels?: ThinkingLevel[];
   resolvedContextWindow?: number;
   resolvedMaxOutputTokens?: number;
+  resolvedThinkingLevels?: ThinkingLevel[];
 }
 
 export interface RouterProfile {

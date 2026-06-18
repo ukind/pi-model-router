@@ -27,6 +27,7 @@ import {
   ROUTER_TIERS,
   resolveContextWindow,
   resolveMaxOutputTokens,
+  collectProfileThinkingLevels,
 } from './config';
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS } from './constants';
 import {
@@ -185,14 +186,19 @@ export const registerRouterProvider = (
     }
 
     const hasReasoning = supportsReasoning(profile, state.currentModelRegistry);
+    const profileLevels = collectProfileThinkingLevels(profile);
+    // Build thinkingLevelMap from the union of all tier models' declared levels.
+    // Only needed if xhigh is in the set (pi supports all others by default).
+    const thinkingLevelMap: Record<string, string> | undefined =
+      hasReasoning && profileLevels.has('xhigh')
+        ? { xhigh: 'xhigh' }
+        : undefined;
 
     return {
       id: name,
       name: `Router ${name}`,
       reasoning: hasReasoning,
-      // Declare xhigh support so pi doesn't clamp it — the router
-      // controls thinking-level mapping for the underlying models.
-      ...(hasReasoning ? { thinkingLevelMap: { xhigh: 'xhigh' } } : {}),
+      ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
       input: ['text', 'image'] as ('text' | 'image')[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: maxContextWindow,

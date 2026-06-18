@@ -86,6 +86,7 @@ describe('commands.ts', () => {
     reloadConfig: vi.fn(),
     ensureValidActiveRouterProfile: vi.fn(),
     switchToRouterProfile: vi.fn().mockResolvedValue(true),
+    syncPiThinkingLevel: vi.fn(),
   });
 
   describe('Registration & Subcommand Completion', () => {

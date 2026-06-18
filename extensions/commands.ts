@@ -2,6 +2,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { AutocompleteItem } from '@earendil-works/pi-tui';
 import type {
   RouterConfig,
@@ -16,6 +17,7 @@ import {
   ROUTER_PIN_VALUES,
   ROUTER_TIERS,
   parseCanonicalModelRef,
+  getUnsupportedTiers,
 } from './config';
 import {
   formatPinSummary,
@@ -53,6 +55,7 @@ export const registerCommands = (
       ctx: ExtensionContext,
       strict?: boolean,
     ) => Promise<boolean>;
+    syncPiThinkingLevel: (level: ThinkingLevel) => void;
   },
 ) => {
   const SUBCOMMAND_DETAILS = [
@@ -357,13 +360,25 @@ export const registerCommands = (
 
     actions.persistState();
     actions.updateStatus(ctx);
-    ctx.ui.notify(
-      nextLevel
-        ? `Router thinking (${tier}) set to ${nextLevel}\n` +
-          `Note: not all tier models may support this thinking level.`
-        : `Router thinking (${tier}) reset to config defaults`,
-      'info',
-    );
+    if (nextLevel) {
+      actions.syncPiThinkingLevel(nextLevel);
+    } else if (state.lastDecision) {
+      actions.syncPiThinkingLevel(state.lastDecision.thinking);
+    }
+    // Only warn when the level isn't supported by some tiers; skip for 'off' and 'auto'
+    if (nextLevel && nextLevel !== 'off') {
+      const unsupported = getUnsupportedTiers(
+        state.currentConfig.profiles[currentProfile],
+        nextLevel,
+      );
+      if (unsupported.length > 0) {
+        ctx.ui.notify(
+          `Router thinking (${tier}) set to ${nextLevel}. ` +
+            `${unsupported.join(', ')} tier${unsupported.length > 1 ? 's' : ''} may not support '${nextLevel}'.`,
+          'warning',
+        );
+      }
+    }
   };
 
   const handleDisable = async (args: string[], ctx: ExtensionContext) => {

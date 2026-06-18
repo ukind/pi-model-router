@@ -18,6 +18,7 @@ import {
   resolveProfileName,
   parseCanonicalModelRef,
   ROUTER_TIERS,
+  getUnsupportedTiers,
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
 import { isRouterPersistedState, buildPersistedState } from './state';
@@ -123,6 +124,7 @@ const routerExtension = (pi: ExtensionAPI) => {
 
   const actions = {
     persistState,
+    syncPiThinkingLevel: setThinkingLevelInternally,
     updateStatus: (ctx: ExtensionContext) =>
       updateStatus(
         ctx,
@@ -486,12 +488,19 @@ const routerExtension = (pi: ExtensionAPI) => {
     }
     persistState();
     actions.updateStatus(ctx);
-    ctx.ui.notify(
-      `Router thinking for ${selectedProfile} (all tiers) set to ${event.level}. ` +
-        `Use /router thinking auto to restore defaults.\n` +
-        `Note: not all tier models may support this thinking level.`,
-      'info',
-    );
+    if (event.level !== 'off') {
+      const unsupported = getUnsupportedTiers(
+        currentConfig.profiles[selectedProfile],
+        event.level,
+      );
+      if (unsupported.length > 0) {
+        ctx.ui.notify(
+          `Router thinking (all) set to ${event.level}. ` +
+            `${unsupported.join(', ')} tier${unsupported.length > 1 ? 's' : ''} may not support '${event.level}'.`,
+          'warning',
+        );
+      }
+    }
   });
 };
 
