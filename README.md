@@ -13,7 +13,7 @@ Intelligent per-turn model router extension for the [pi-coding-agent](https://gi
   - **Cost Budgeting**: Set a session spend limit; high tier downgrades to medium once exceeded.
   - **Fallback Chains**: Automatic retry with alternative models if the primary choice fails.
 - **Phase Memory**: Biased stickiness to keep you in the same tier during multi-turn planning or implementation work.
-- **Thinking Control**: Full control over reasoning/thinking levels per tier and profile.
+- **Thinking Control**: Full control over reasoning/thinking levels per tier and profile. Changing pi's thinking level (e.g. via `shift+tab`) automatically applies as an all-tier override for the active router profile.
 - **Persistent State**: Pins, profiles, costs, and debug history are remembered across agent restarts and conversation branches.
 
 ## Installation
@@ -81,9 +81,10 @@ Copy the example config to one of:
 | `/router`                   | Show detailed status, current profile, spend, and settings.                     |
 | `/router status`            | Alias for `/router` (show current status).                                      |
 | `/router profile [name]`    | Switch to a profile or list available ones (enables router if off).             |
-| `/router pin [prof] <t\|a>` | Pin a tier (high/medium/low/auto) for the current or specified profile.         |
+| `/router pin <t\|a>`        | Pin a tier (high/medium/low/auto) for the active profile.                      |
 | `/router fix <tier>`        | Correct the _last_ decision and pin that tier for the current profile.          |
-| `/router thinking ...`      | Override thinking levels (e.g. `/router thinking low xhigh`).                   |
+| `/router thinking <level>`  | Override thinking level for all tiers (e.g. `/router thinking xhigh`). Not all tier models may support every level. |
+| `/router thinking <tier> <level>` | Override thinking level for a specific tier (e.g. `/router thinking low off`). |
 | `/router disable`           | Disable the router and switch back to the last non-router model.                |
 | `/router widget <on\|off>`  | Toggle the persistent state widget (supports `toggle`).                         |
 | `/router debug <on\|off>`   | Toggle turn-by-turn routing notifications (supports `toggle`, `clear`, `show`). |

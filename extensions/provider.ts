@@ -13,6 +13,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type {
   RouterConfig,
   RoutingDecision,
@@ -26,6 +27,7 @@ import {
   ROUTER_TIERS,
   resolveContextWindow,
   resolveMaxOutputTokens,
+  collectProfileThinkingLevels,
 } from './config';
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS } from './constants';
 import {
@@ -153,6 +155,7 @@ export const registerRouterProvider = (
     recordDebugDecision: (decision: RoutingDecision) => void;
     getThinkingOverride: (profileName: string, tier: RouterTier) => any;
     updateStatus: (ctx: ExtensionContext) => void;
+    syncPiThinkingLevel: (level: ThinkingLevel) => void;
   },
 ) => {
   const profileList = profileNames(state.currentConfig);
@@ -182,10 +185,20 @@ export const registerRouterProvider = (
       if (mot > maxMaxOutputTokens) maxMaxOutputTokens = mot;
     }
 
+    const hasReasoning = supportsReasoning(profile, state.currentModelRegistry);
+    const profileLevels = collectProfileThinkingLevels(profile);
+    // Build thinkingLevelMap from the union of all tier models' declared levels.
+    // Only needed if xhigh is in the set (pi supports all others by default).
+    const thinkingLevelMap: Record<string, string> | undefined =
+      hasReasoning && profileLevels.has('xhigh')
+        ? { xhigh: 'xhigh' }
+        : undefined;
+
     return {
       id: name,
       name: `Router ${name}`,
-      reasoning: supportsReasoning(profile, state.currentModelRegistry),
+      reasoning: hasReasoning,
+      ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
       input: ['text', 'image'] as ('text' | 'image')[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: maxContextWindow,
@@ -352,6 +365,12 @@ export const registerRouterProvider = (
 
           state.lastDecision = decision;
           actions.recordDebugDecision(decision);
+
+          // Sync pi's thinking level display with the router's effective thinking
+          const effectiveThinking =
+            actions.getThinkingOverride(model.id, decision.tier) ??
+            decision.thinking;
+          actions.syncPiThinkingLevel(effectiveThinking);
 
           if (state.lastExtensionContext) {
             actions.updateStatus(state.lastExtensionContext);

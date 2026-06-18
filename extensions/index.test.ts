@@ -14,14 +14,16 @@ vi.mock('./config', () => ({
     warnings: [],
   }),
   profileNames: () => ['balanced'],
-  resolveProfileName: (config: any, name: any) =>
+  resolveProfileName: (config: unknown, name: unknown) =>
     name === 'balanced' ? 'balanced' : undefined,
-  parseCanonicalModelRef: (ref: string) => ({
+  parseCanonicalModelRef: (_ref: string) => ({
     provider: 'openai',
     modelId: 'gpt-4o',
   }),
   resolveContextWindow: () => 100000,
   resolveMaxOutputTokens: () => 4000,
+  collectProfileThinkingLevels: () => new Set<string>(),
+  getUnsupportedTiers: () => [] as string[],
   ROUTER_TIERS: ['high', 'medium', 'low'] as const,
   ROUTER_PIN_VALUES: ['auto', 'high', 'medium', 'low'] as const,
   THINKING_LEVELS: [
@@ -32,7 +34,7 @@ vi.mock('./config', () => ({
     'high',
     'xhigh',
   ] as const,
-  isRouterTier: (v: any) => v === 'high' || v === 'medium' || v === 'low',
+  isRouterTier: (v: unknown) => v === 'high' || v === 'medium' || v === 'low',
 }));
 
 describe('index.ts (orchestrator)', () => {

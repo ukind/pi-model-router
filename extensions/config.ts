@@ -32,6 +32,8 @@ export const THINKING_LEVELS: readonly ThinkingLevel[] = [
 ];
 export const ROUTER_PIN_VALUES = ['auto', 'high', 'medium', 'low'] as const;
 
+export const DEFAULT_THINKING_LEVELS: readonly ThinkingLevel[] = ['high', 'medium', 'low'] as const;
+
 export const isObjectRecord = (
   value: unknown,
 ): value is Record<string, unknown> =>
@@ -194,7 +196,18 @@ export const normalizeModelsMap = (
       );
     }
 
-    result[alias] = { model, contextWindow, maxOutputTokens };
+    const reasoning =
+      typeof entry.reasoning === 'boolean' ? entry.reasoning : undefined;
+
+    let thinkingLevels: ThinkingLevel[] | undefined;
+    if (Array.isArray(entry.thinkingLevels)) {
+      thinkingLevels = entry.thinkingLevels.filter(
+        (l): l is ThinkingLevel => isThinkingLevel(l),
+      );
+      if (thinkingLevels.length === 0) thinkingLevels = undefined;
+    }
+
+    result[alias] = { model, contextWindow, maxOutputTokens, reasoning, thinkingLevels };
   }
 
   return result;
@@ -279,14 +292,43 @@ export const normalizeTierConfig = (
   const resolvedMaxOutputTokens =
     tierMaxOutputTokens ?? aliasDefinition?.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
 
+  // Resolve reasoning: tier config > alias > undefined (assumed true)
+  const tierReasoning =
+    typeof value.reasoning === 'boolean' ? value.reasoning : undefined;
+  const effectiveReasoning = tierReasoning ?? aliasDefinition?.reasoning;
+
+  // Resolve thinkingLevels: tier config > alias > default
+  // Validate tier-level thinkingLevels array
+  let tierThinkingLevels: ThinkingLevel[] | undefined;
+  if (Array.isArray(value.thinkingLevels)) {
+    tierThinkingLevels = (value.thinkingLevels as unknown[]).filter(
+      (l): l is ThinkingLevel => isThinkingLevel(l),
+    );
+    if (tierThinkingLevels.length === 0) tierThinkingLevels = undefined;
+  }
+
+  const baseThinkingLevels: ThinkingLevel[] =
+    tierThinkingLevels ??
+    aliasDefinition?.thinkingLevels ??
+    (effectiveReasoning === false ? [] : [...DEFAULT_THINKING_LEVELS]);
+
+  // Auto-add the tier's thinking value if it's not 'off' and not already present
+  const resolvedThinkingLevels: ThinkingLevel[] = [...baseThinkingLevels];
+  if (thinking !== 'off' && !resolvedThinkingLevels.includes(thinking)) {
+    resolvedThinkingLevels.push(thinking);
+  }
+
   return {
     model: parsedModel,
     thinking,
     fallbacks,
     contextWindow: tierContextWindow,
     maxOutputTokens: tierMaxOutputTokens,
+    reasoning: tierReasoning,
+    thinkingLevels: tierThinkingLevels,
     resolvedContextWindow,
     resolvedMaxOutputTokens,
+    resolvedThinkingLevels,
   };
 };
 
@@ -514,4 +556,41 @@ export const resolveMaxOutputTokens = (
 
   // 2-4. Pre-resolved during config normalization (tier > alias > hardcoded)
   return tierConfig.resolvedMaxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+};
+
+/**
+ * Collect the union of all tier models' resolved thinking levels for a profile.
+ * Returns a Set of ThinkingLevel values.
+ */
+export const collectProfileThinkingLevels = (
+  profile: RouterProfile,
+): Set<ThinkingLevel> => {
+  const levels = new Set<ThinkingLevel>();
+  for (const tier of ROUTER_TIERS) {
+    const tierConfig = profile[tier];
+    if (!tierConfig?.resolvedThinkingLevels) continue;
+    for (const level of tierConfig.resolvedThinkingLevels) {
+      levels.add(level);
+    }
+  }
+  return levels;
+};
+
+/**
+ * Returns tier names whose models don't include the given thinking level
+ * in their resolvedThinkingLevels.
+ */
+export const getUnsupportedTiers = (
+  profile: RouterProfile,
+  level: ThinkingLevel,
+): string[] => {
+  const unsupported: string[] = [];
+  for (const tier of ROUTER_TIERS) {
+    const tierConfig = profile[tier];
+    if (!tierConfig) continue;
+    if (!tierConfig.resolvedThinkingLevels?.includes(level)) {
+      unsupported.push(tier);
+    }
+  }
+  return unsupported;
 };

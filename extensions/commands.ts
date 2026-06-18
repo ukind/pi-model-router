@@ -2,6 +2,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { AutocompleteItem } from '@earendil-works/pi-tui';
 import type {
   RouterConfig,
@@ -16,6 +17,7 @@ import {
   ROUTER_PIN_VALUES,
   ROUTER_TIERS,
   parseCanonicalModelRef,
+  getUnsupportedTiers,
 } from './config';
 import {
   formatPinSummary,
@@ -53,6 +55,7 @@ export const registerCommands = (
       ctx: ExtensionContext,
       strict?: boolean,
     ) => Promise<boolean>;
+    syncPiThinkingLevel: (level: ThinkingLevel) => void;
   },
 ) => {
   const SUBCOMMAND_DETAILS = [
@@ -85,10 +88,10 @@ export const registerCommands = (
   };
 
   const getPinCompletions = (args: string[]): AutocompleteItem[] | null => {
-    // pin [profile] <tier|auto>
+    // pin <tier|auto>
     if (args.length <= 1) {
       const token = args[0] ?? '';
-      const pinItems = ROUTER_PIN_VALUES.filter((value) =>
+      const items = ROUTER_PIN_VALUES.filter((value) =>
         value.startsWith(token),
       ).map((value) => ({
         value,
@@ -97,38 +100,15 @@ export const registerCommands = (
           ? 'Restore auto-routing (clear pin) for the active profile'
           : `Pin active profile to ${value} tier`,
       }));
-      const profileItems = profileNames(state.currentConfig)
-        .filter((name) => name.startsWith(token))
-        .map((name) => ({
-          value: name,
-          label: `router/${name}`,
-          description: `Configure pinning for profile "${name}"`,
-        }));
-      const items = [...pinItems, ...profileItems];
       return items.length > 0 ? items : null;
     }
-
-    const profileToken = args[0];
-    if (!state.currentConfig.profiles[profileToken]) {
-      return null;
-    }
-    const pinPrefix = args[1] ?? '';
-    const items = ROUTER_PIN_VALUES.filter((value) =>
-      value.startsWith(pinPrefix),
-    ).map((value) => ({
-      value: `${profileToken} ${value}`,
-      label: `${profileToken} ${value}`,
-      description: value === 'auto'
-        ? `Restore auto-routing (clear pin) for profile "${profileToken}"`
-        : `Pin profile "${profileToken}" to ${value} tier`,
-    }));
-    return items.length > 0 ? items : null;
+    return null;
   };
 
   const getThinkingCompletions = (
     args: string[],
   ): AutocompleteItem[] | null => {
-    // thinking [profile] [tier] <level|auto>
+    // thinking [tier] <level|auto>
     const tierValues = [...ROUTER_TIERS];
     const levelValues = ['auto', ...THINKING_LEVELS];
 
@@ -151,13 +131,6 @@ export const registerCommands = (
             label: v,
             description: `Override thinking for ${v} tier`,
           })),
-        ...profileNames(state.currentConfig)
-          .filter((name) => name.startsWith(token))
-          .map((name) => ({
-            value: name,
-            label: `router/${name}`,
-            description: `Override thinking for profile "${name}"`,
-          })),
       ];
     }
 
@@ -177,50 +150,6 @@ export const registerCommands = (
             ? `Restore default thinking level for ${tier} tier`
             : `Set thinking level to ${v} for ${tier} tier`,
         }));
-    }
-
-    if (state.currentConfig.profiles[args[0]]) {
-      const profile = args[0];
-      const nextPrefix = args[1] ?? '';
-
-      if (args.length === 2) {
-        return [
-          ...tierValues
-            .filter((v) => v.startsWith(nextPrefix))
-            .map((v) => ({
-              value: `${profile} ${v}`,
-              label: v,
-              description: `Override thinking for profile "${profile}" ${v} tier`,
-            })),
-          ...levelValues
-            .filter((v) => v.startsWith(nextPrefix))
-            .map((v) => ({
-              value: `${profile} ${v}`,
-              label: v,
-              description: v === 'auto'
-                ? `Restore default thinking for all tiers of profile "${profile}"`
-                : `Set thinking to ${v} for all tiers of profile "${profile}"`,
-            })),
-        ];
-      }
-
-      if (levelValues.includes(args[1])) {
-        return null;
-      }
-
-      if ((tierValues as string[]).includes(args[1])) {
-        const tier = args[1];
-        const levelPrefix = args[2] ?? '';
-        return levelValues
-          .filter((v) => v.startsWith(levelPrefix))
-          .map((v) => ({
-            value: `${profile} ${tier} ${v}`,
-            label: v,
-            description: v === 'auto'
-              ? `Restore default thinking for profile "${profile}" ${tier} tier`
-              : `Set thinking to ${v} for profile "${profile}" ${tier} tier`,
-          }));
-      }
     }
 
     return null;
@@ -303,9 +232,7 @@ export const registerCommands = (
         [
           `Profile: ${currentProfile}`,
           `Pinned tier: ${state.pinnedTierByProfile[currentProfile] ?? 'auto'}`,
-          `Pins by profile: ${formatPinSummary(state.pinnedTierByProfile)}`,
           `Usage: /router pin <high|medium|low|auto>`,
-          `   or: /router pin <profile> <high|medium|low|auto>`,
         ].join('\n'),
         'info',
       );
@@ -313,39 +240,15 @@ export const registerCommands = (
       return;
     }
 
-    if (args.length > 2) {
+    if (args.length > 1) {
       ctx.ui.notify(
-        'Usage: /router pin [profile] <high|medium|low|auto>',
+        'Usage: /router pin <high|medium|low|auto>',
         'error',
       );
       return;
     }
 
-    let profileName = currentProfile;
-    let pinValue = '';
-
-    if (args.length === 1) {
-      pinValue = args[0];
-    } else {
-      profileName = args[0];
-      pinValue = args[1];
-    }
-
-    if (!state.currentConfig.profiles[profileName]) {
-      // If we had two args and the first wasn't a profile, it's definitely an error
-      if (args.length === 2) {
-        ctx.ui.notify(`Unknown router profile: ${profileName}`, 'error');
-        return;
-      }
-      // If one arg, maybe they meant the pin value for the current profile
-      if (ROUTER_PIN_VALUES.includes(args[0] as any)) {
-        profileName = currentProfile;
-        pinValue = args[0];
-      } else {
-        ctx.ui.notify(`Unknown router profile: ${profileName}`, 'error');
-        return;
-      }
-    }
+    const pinValue = args[0];
 
     if (!ROUTER_PIN_VALUES.includes(pinValue as any)) {
       ctx.ui.notify(
@@ -357,16 +260,16 @@ export const registerCommands = (
 
     const nextTier = pinValue === 'auto' ? undefined : (pinValue as RouterTier);
     if (nextTier) {
-      state.pinnedTierByProfile[profileName] = nextTier;
+      state.pinnedTierByProfile[currentProfile] = nextTier;
     } else {
-      delete state.pinnedTierByProfile[profileName];
+      delete state.pinnedTierByProfile[currentProfile];
     }
     actions.persistState();
     actions.updateStatus(ctx);
     ctx.ui.notify(
       nextTier
-        ? `Router profile ${profileName} pinned to ${nextTier}`
-        : `Router profile ${profileName} pin cleared; heuristic routing restored`,
+        ? `Router pinned to ${nextTier}`
+        : `Router pin cleared; heuristic routing restored`,
       'info',
     );
   };
@@ -382,21 +285,20 @@ export const registerCommands = (
         [
           `Profile: ${currentProfile}`,
           `Thinking overrides: ${JSON.stringify(state.thinkingByProfile[currentProfile] ?? {})}`,
-          'Usage: /router thinking <level|auto>',
-          '   or: /router thinking <tier> <level|auto>',
-          '   or: /router thinking <profile> <tier> <level|auto>',
+          'Usage: /router thinking <level|auto>           (applies to all tiers)',
+          '   or: /router thinking <tier> <level|auto>    (applies to one tier)',
+          'Note: not all tier models may support every thinking level.',
         ].join('\n'),
         'info',
       );
       return;
     }
 
-    if (args.length > 3) {
+    if (args.length > 2) {
       ctx.ui.notify('Too many arguments for /router thinking.', 'error');
       return;
     }
 
-    let profileName = currentProfile;
     let tier: RouterTier | 'all' | undefined = undefined;
     let levelValue = '';
 
@@ -405,34 +307,20 @@ export const registerCommands = (
 
     if (args.length === 1) {
       levelValue = args[0];
-      tier =
-        state.pinnedTierByProfile[profileName] ??
-        (state.lastDecision?.profile === profileName
-          ? state.lastDecision.tier
-          : 'medium');
+      tier = 'all';
     } else if (args.length === 2) {
       if (tierValues.includes(args[0]) || args[0] === 'all') {
         tier = args[0] as RouterTier | 'all';
         levelValue = args[1];
       } else {
-        profileName = args[0];
-        levelValue = args[1];
-        tier =
-          state.pinnedTierByProfile[profileName] ??
-          (state.lastDecision?.profile === profileName
-            ? state.lastDecision.tier
-            : 'medium');
+        ctx.ui.notify(
+          `Invalid tier: ${args[0]}. Use high, medium, or low.`,
+          'error',
+        );
+        return;
       }
-    } else if (args.length === 3) {
-      profileName = args[0];
-      tier = args[1] as RouterTier | 'all';
-      levelValue = args[2];
     }
 
-    if (!state.currentConfig.profiles[profileName]) {
-      ctx.ui.notify(`Unknown router profile: ${profileName}`, 'error');
-      return;
-    }
     if (tier !== 'all' && !tierValues.includes(tier as string)) {
       ctx.ui.notify(
         `Invalid tier: ${tier}. Use high, medium, or low.`,
@@ -451,33 +339,46 @@ export const registerCommands = (
     const nextLevel = levelValue === 'auto' ? undefined : (levelValue as any);
     if (tier === 'all') {
       for (const t of ROUTER_TIERS) {
-        if (!state.thinkingByProfile[profileName])
-          state.thinkingByProfile[profileName] = {};
-        if (nextLevel) state.thinkingByProfile[profileName]![t] = nextLevel;
-        else delete state.thinkingByProfile[profileName]![t];
+        if (!state.thinkingByProfile[currentProfile])
+          state.thinkingByProfile[currentProfile] = {};
+        if (nextLevel) state.thinkingByProfile[currentProfile]![t] = nextLevel;
+        else delete state.thinkingByProfile[currentProfile]![t];
       }
     } else {
-      if (!state.thinkingByProfile[profileName])
-        state.thinkingByProfile[profileName] = {};
+      if (!state.thinkingByProfile[currentProfile])
+        state.thinkingByProfile[currentProfile] = {};
       if (nextLevel)
-        state.thinkingByProfile[profileName]![tier as RouterTier] = nextLevel;
-      else delete state.thinkingByProfile[profileName]![tier as RouterTier];
+        state.thinkingByProfile[currentProfile]![tier as RouterTier] = nextLevel;
+      else delete state.thinkingByProfile[currentProfile]![tier as RouterTier];
     }
     if (
-      state.thinkingByProfile[profileName] &&
-      Object.keys(state.thinkingByProfile[profileName]!).length === 0
+      state.thinkingByProfile[currentProfile] &&
+      Object.keys(state.thinkingByProfile[currentProfile]!).length === 0
     ) {
-      delete state.thinkingByProfile[profileName];
+      delete state.thinkingByProfile[currentProfile];
     }
 
     actions.persistState();
     actions.updateStatus(ctx);
-    ctx.ui.notify(
-      nextLevel
-        ? `Router profile ${profileName} thinking (${tier}) set to ${nextLevel}`
-        : `Router profile ${profileName} thinking (${tier}) reset to config defaults`,
-      'info',
-    );
+    if (nextLevel) {
+      actions.syncPiThinkingLevel(nextLevel);
+    } else if (state.lastDecision) {
+      actions.syncPiThinkingLevel(state.lastDecision.thinking);
+    }
+    // Only warn when the level isn't supported by some tiers; skip for 'off' and 'auto'
+    if (nextLevel && nextLevel !== 'off') {
+      const unsupported = getUnsupportedTiers(
+        state.currentConfig.profiles[currentProfile],
+        nextLevel,
+      );
+      if (unsupported.length > 0) {
+        ctx.ui.notify(
+          `Router thinking (${tier}) set to ${nextLevel}. ` +
+            `${unsupported.join(', ')} tier${unsupported.length > 1 ? 's' : ''} may not support '${nextLevel}'.`,
+          'warning',
+        );
+      }
+    }
   };
 
   const handleDisable = async (args: string[], ctx: ExtensionContext) => {
@@ -736,8 +637,8 @@ export const registerCommands = (
               'Router Subcommands:',
               '  status                      Show current status, profile, pin, cost, and last decision.',
               '  profile [name]              Switch to a profile (enables router if off). Lists available if no name.',
-              '  pin [profile] <tier|auto>   Force a tier (high|medium|low) for a profile or set to auto.',
-              '  thinking [prof] [tier] <lv> Override thinking level for a profile/tier (off|minimal|...|xhigh|auto).',
+              '  pin <tier|auto>             Force a tier (high|medium|low) or set to auto.',
+              '  thinking [tier] <level>     Override thinking level (off|minimal|...|xhigh|auto). Not all tier models may support every level.',
               '  disable                     Disable the router and restore the last used non-router model.',
               '  fix <tier>                  Correct the last routing decision and pin that tier for the current profile.',
               '  widget <on|off|toggle>      Control the persistent status widget visibility.',
