@@ -11,7 +11,7 @@ import {
   profileNames,
   resolveProfileName,
   resolveContextWindow,
-  resolveMaxOutputTokens,
+  resolveMaxTokens,
   isObjectRecord,
   isThinkingLevel,
   isRouterTier,
@@ -215,7 +215,7 @@ describe('config.ts', () => {
       expect(result.valid).toEqual({
         model: 'openai/gpt-4o',
         contextWindow: 100000,
-        maxOutputTokens: undefined,
+        maxTokens: undefined,
       });
       expect(warnings.length).toBe(3);
     });
@@ -247,7 +247,7 @@ describe('config.ts', () => {
         thinking: 'high',
         fallbacks: ['google/gemini-1.5-flash', 'invalid-fallback'],
         contextWindow: 50000,
-        maxOutputTokens: 2000,
+        maxTokens: 2000,
       };
       const result = normalizeTierConfig(raw, 'p', 'high', warnings, models);
       expect(result).toBeDefined();
@@ -255,7 +255,7 @@ describe('config.ts', () => {
       expect(result?.thinking).toBe('high');
       expect(result?.fallbacks).toEqual(['google/gemini-1.5-flash']);
       expect(result?.resolvedContextWindow).toBe(50000);
-      expect(result?.resolvedMaxOutputTokens).toBe(2000);
+      expect(result?.resolvedMaxTokens).toBe(2000);
       expect(warnings.length).toBe(1);
       expect(warnings[0]).toContain('Invalid fallback model');
     });
@@ -341,12 +341,12 @@ describe('config.ts', () => {
     });
   });
 
-  describe('resolveContextWindow and resolveMaxOutputTokens', () => {
+  describe('resolveContextWindow and resolveMaxTokens', () => {
     const profile: RouterProfile = {
       high: {
         model: 'openai/gpt-4o',
         resolvedContextWindow: 60000,
-        resolvedMaxOutputTokens: 4000,
+        resolvedMaxTokens: 4000,
       },
     };
 
@@ -365,14 +365,14 @@ describe('config.ts', () => {
 
     it('should resolve using registry if available', () => {
       const cw = resolveContextWindow('high', profile, mockRegistry as any);
-      const mot = resolveMaxOutputTokens('high', profile, mockRegistry as any);
+      const mot = resolveMaxTokens('high', profile, mockRegistry as any);
       expect(cw).toBe(99999);
       expect(mot).toBe(8888);
     });
 
     it('should fall back to pre-resolved config values if registry lookup fails or is missing', () => {
       const cw = resolveContextWindow('high', profile, undefined);
-      const mot = resolveMaxOutputTokens('high', profile, undefined);
+      const mot = resolveMaxTokens('high', profile, undefined);
       expect(cw).toBe(60000);
       expect(mot).toBe(4000);
     });

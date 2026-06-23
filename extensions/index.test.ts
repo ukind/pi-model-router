@@ -21,7 +21,7 @@ vi.mock('./config', () => ({
     modelId: 'gpt-4o',
   }),
   resolveContextWindow: () => 100000,
-  resolveMaxOutputTokens: () => 4000,
+  resolveMaxTokens: () => 4000,
   collectProfileThinkingLevels: () => new Set<string>(),
   getUnsupportedTiers: () => [] as string[],
   ROUTER_TIERS: ['high', 'medium', 'low'] as const,

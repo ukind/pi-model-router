@@ -16,7 +16,7 @@ import type {
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import {
   DEFAULT_CONTEXT_WINDOW,
-  DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_MAX_TOKENS,
 } from './constants';
 
 export const ROUTER_TIERS = ['high', 'medium', 'low'] as const;
@@ -186,13 +186,13 @@ export const normalizeModelsMap = (
       );
     }
 
-    const maxOutputTokens =
-      typeof entry.maxOutputTokens === 'number' && entry.maxOutputTokens > 0
-        ? entry.maxOutputTokens
+    const maxTokens =
+      typeof entry.maxTokens === 'number' && entry.maxTokens > 0
+        ? entry.maxTokens
         : undefined;
-    if (entry.maxOutputTokens !== undefined && !maxOutputTokens) {
+    if (entry.maxTokens !== undefined && !maxTokens) {
       warnings.push(
-        `Model definition "${alias}" has invalid maxOutputTokens. Ignored.`,
+        `Model definition "${alias}" has invalid maxTokens. Ignored.`,
       );
     }
 
@@ -207,7 +207,7 @@ export const normalizeModelsMap = (
       if (thinkingLevels.length === 0) thinkingLevels = undefined;
     }
 
-    result[alias] = { model, contextWindow, maxOutputTokens, reasoning, thinkingLevels };
+    result[alias] = { model, contextWindow, maxTokens, reasoning, thinkingLevels };
   }
 
   return result;
@@ -284,13 +284,13 @@ export const normalizeTierConfig = (
   const resolvedContextWindow =
     tierContextWindow ?? aliasDefinition?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
 
-  // Resolve maxOutputTokens: tier config > alias > hardcoded default
-  const tierMaxOutputTokens =
-    typeof value.maxOutputTokens === 'number' && value.maxOutputTokens > 0
-      ? value.maxOutputTokens
+  // Resolve maxTokens: tier config > alias > hardcoded default
+  const tierMaxTokens =
+    typeof value.maxTokens === 'number' && value.maxTokens > 0
+      ? value.maxTokens
       : undefined;
-  const resolvedMaxOutputTokens =
-    tierMaxOutputTokens ?? aliasDefinition?.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  const resolvedMaxTokens =
+    tierMaxTokens ?? aliasDefinition?.maxTokens ?? DEFAULT_MAX_TOKENS;
 
   // Resolve reasoning: tier config > alias > undefined (assumed true)
   const tierReasoning =
@@ -323,11 +323,11 @@ export const normalizeTierConfig = (
     thinking,
     fallbacks,
     contextWindow: tierContextWindow,
-    maxOutputTokens: tierMaxOutputTokens,
+    maxTokens: tierMaxTokens,
     reasoning: tierReasoning,
     thinkingLevels: tierThinkingLevels,
     resolvedContextWindow,
-    resolvedMaxOutputTokens,
+    resolvedMaxTokens,
     resolvedThinkingLevels,
   };
 };
@@ -532,18 +532,18 @@ export const resolveContextWindow = (
 };
 
 /**
- * Resolve the effective max output tokens for a specific tier at runtime,
+ * Resolve the effective max tokens for a specific tier at runtime,
  * incorporating the API model registry as the highest-priority source.
  *
  * Resolution chain: API > tier config > model alias > hardcoded default
  */
-export const resolveMaxOutputTokens = (
+export const resolveMaxTokens = (
   tier: RouterTier,
   profile: RouterProfile,
   modelRegistry: ExtensionContext['modelRegistry'] | undefined,
 ): number => {
   const tierConfig = profile[tier];
-  if (!tierConfig) return DEFAULT_MAX_OUTPUT_TOKENS;
+  if (!tierConfig) return DEFAULT_MAX_TOKENS;
 
   // 1. API value (highest priority)
   if (modelRegistry) {
@@ -555,7 +555,7 @@ export const resolveMaxOutputTokens = (
   }
 
   // 2-4. Pre-resolved during config normalization (tier > alias > hardcoded)
-  return tierConfig.resolvedMaxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  return tierConfig.resolvedMaxTokens ?? DEFAULT_MAX_TOKENS;
 };
 
 /**

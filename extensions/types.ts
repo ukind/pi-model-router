@@ -16,7 +16,7 @@ export interface RoutingRule {
 export interface ModelDefinition {
   model: string;
   contextWindow?: number;
-  maxOutputTokens?: number;
+  maxTokens?: number;
   reasoning?: boolean;
   thinkingLevels?: ThinkingLevel[];
 }
@@ -31,11 +31,11 @@ export interface RoutedTierConfig {
   thinking?: ThinkingLevel;
   fallbacks?: string[];
   contextWindow?: number;
-  maxOutputTokens?: number;
+  maxTokens?: number;
   reasoning?: boolean;
   thinkingLevels?: ThinkingLevel[];
   resolvedContextWindow?: number;
-  resolvedMaxOutputTokens?: number;
+  resolvedMaxTokens?: number;
   resolvedThinkingLevels?: ThinkingLevel[];
 }
 

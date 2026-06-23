@@ -71,7 +71,7 @@ Copy the example config to one of:
 | `maxSessionBudget`      | (Optional) USD budget for the session. Forces `medium` tier once exceeded.        |
 | `phaseBias`             | (0.0 - 1.0) Stickiness of the current phase. Higher = more stable. Default `0.5`. |
 | `rules`                 | List of custom keyword rules (e.g. `{ "matches": "deploy", "tier": "high" }`).    |
-| `models`                | (Optional) Map of model aliases to definitions with `model`, `contextWindow`, `maxOutputTokens`. |
+| `models`                | (Optional) Map of model aliases to definitions with `model`, `contextWindow`, `maxTokens`. |
 | `profiles`              | Map of profile definitions, each containing optional `high`, `medium`, and `low` tiers (at least one required). Tier models can reference aliases from `models`. |
 
 ## Commands

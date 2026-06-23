@@ -26,10 +26,10 @@ import {
   parseCanonicalModelRef,
   ROUTER_TIERS,
   resolveContextWindow,
-  resolveMaxOutputTokens,
+  resolveMaxTokens,
   collectProfileThinkingLevels,
 } from './config';
-import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS } from './constants';
+import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 import {
   phaseForTier,
   buildRoutingDecision,
@@ -168,7 +168,7 @@ export const registerRouterProvider = (
     // The honesty check + truncateContext handles the case where the
     // actually routed model is smaller.
     let maxContextWindow = DEFAULT_CONTEXT_WINDOW;
-    let maxMaxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
+    let maxMaxTokens = DEFAULT_MAX_TOKENS;
     for (const tier of ROUTER_TIERS) {
       if (!profile[tier]) continue;
       const cw = resolveContextWindow(
@@ -176,13 +176,13 @@ export const registerRouterProvider = (
         profile,
         state.currentModelRegistry,
       );
-      const mot = resolveMaxOutputTokens(
+      const mot = resolveMaxTokens(
         tier,
         profile,
         state.currentModelRegistry,
       );
       if (cw > maxContextWindow) maxContextWindow = cw;
-      if (mot > maxMaxOutputTokens) maxMaxOutputTokens = mot;
+      if (mot > maxMaxTokens) maxMaxTokens = mot;
     }
 
     const hasReasoning = supportsReasoning(profile, state.currentModelRegistry);
@@ -202,7 +202,7 @@ export const registerRouterProvider = (
       input: ['text', 'image'] as ('text' | 'image')[],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: maxContextWindow,
-      maxTokens: maxMaxOutputTokens,
+      maxTokens: maxMaxTokens,
     };
   });
 

@@ -7,7 +7,7 @@
     "gpt-pro": {
       "model": "openai/gpt-5.4-pro",
       "contextWindow": 256000,
-      "maxOutputTokens": 64000,
+      "maxTokens": 64000,
       "thinkingLevels": ["high", "medium", "low"]
     },
     "flash": {
@@ -17,7 +17,7 @@
     "nano": {
       "model": "openai/gpt-5.4-nano",
       "contextWindow": 128000,
-      "maxOutputTokens": 8192,
+      "maxTokens": 8192,
       "reasoning": false
     },
     "sonnet": {
