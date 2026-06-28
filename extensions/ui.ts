@@ -12,11 +12,12 @@ const getEffectiveThinking = (
   decision: RoutingDecision,
 ) => thinkingByProfile[profileName]?.[decision.tier] ?? decision.thinking;
 
-const getDecisionFlags = (decision: RoutingDecision): string[] => {
+export const getDecisionFlags = (decision: RoutingDecision): string[] => {
   const flags: string[] = [];
   if (decision.isFallback) flags.push('fallback');
   if (decision.isBudgetForced) flags.push('budget-limit');
   if (decision.isRuleMatched) flags.push('rule');
+  if (decision.isClassifier) flags.push('classifier');
   return flags;
 };
 
@@ -65,7 +66,9 @@ export const updateStatus = (
 ) => {
   const activeRouterProfile = routerEnabled ? selectedProfile : undefined;
   const statusProfile = selectedProfile ?? 'none';
-  const activePin = selectedProfile ? pinnedTierByProfile[selectedProfile] : undefined;
+  const activePin = selectedProfile
+    ? pinnedTierByProfile[selectedProfile]
+    : undefined;
   const pinLabel = activePin ? ` [pin:${activePin}]` : '';
 
   if (activeRouterProfile) {

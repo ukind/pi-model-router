@@ -4,6 +4,7 @@ import {
   formatPinSummary,
   formatThinkingSummary,
   formatModelRef,
+  getDecisionFlags,
   updateStatus,
 } from './ui';
 import type { RoutingDecision, RouterConfig } from './types';
@@ -63,6 +64,50 @@ describe('ui.ts', () => {
     it('should return model name or none', () => {
       expect(formatModelRef('openai/gpt-4o')).toBe('openai/gpt-4o');
       expect(formatModelRef(undefined)).toBe('none');
+    });
+  });
+
+  describe('getDecisionFlags', () => {
+    const mk = (overrides: Partial<RoutingDecision> = {}): RoutingDecision => ({
+      profile: 'test',
+      tier: 'medium',
+      phase: 'implementation',
+      targetProvider: 'openai',
+      targetModelId: 'gpt-4',
+      targetLabel: 'openai/gpt-4',
+      reasoning: 'test',
+      thinking: 'medium',
+      timestamp: Date.now(),
+      ...overrides,
+    });
+
+    it('returns classifier flag when isClassifier is true', () => {
+      expect(getDecisionFlags(mk({ isClassifier: true }))).toEqual([
+        'classifier',
+      ]);
+    });
+
+    it('returns fallback and classifier flags together', () => {
+      expect(
+        getDecisionFlags(mk({ isClassifier: true, isFallback: true })),
+      ).toEqual(['fallback', 'classifier']);
+    });
+
+    it('returns empty array when no flags set', () => {
+      expect(getDecisionFlags(mk())).toEqual([]);
+    });
+
+    it('returns all flags when all are true', () => {
+      expect(
+        getDecisionFlags(
+          mk({
+            isFallback: true,
+            isBudgetForced: true,
+            isRuleMatched: true,
+            isClassifier: true,
+          }),
+        ),
+      ).toEqual(['fallback', 'budget-limit', 'rule', 'classifier']);
     });
   });
 

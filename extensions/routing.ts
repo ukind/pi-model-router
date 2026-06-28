@@ -82,17 +82,28 @@ export const phaseForTier = (tier: RouterTier): RouterPhase => {
 export const resolveAvailableTier = (
   profile: RouterProfile,
   preferred: RouterTier,
+  preferDown = false,
 ): RouterTier => {
   if (profile[preferred]) return preferred;
-  // Fall "up": low → medium → high
   const order: RouterTier[] = ['low', 'medium', 'high'];
   const startIdx = order.indexOf(preferred);
-  for (let i = startIdx + 1; i < order.length; i++) {
-    if (profile[order[i]]) return order[i];
-  }
-  // Fall "down" as last resort
-  for (let i = startIdx - 1; i >= 0; i--) {
-    if (profile[order[i]]) return order[i];
+  if (preferDown) {
+    // Budget path: try lower tiers first to respect the cap
+    for (let i = startIdx - 1; i >= 0; i--) {
+      if (profile[order[i]]) return order[i];
+    }
+    // Last resort: fall up (e.g. high-only profile)
+    for (let i = startIdx + 1; i < order.length; i++) {
+      if (profile[order[i]]) return order[i];
+    }
+  } else {
+    // Normal path: fall up first
+    for (let i = startIdx + 1; i < order.length; i++) {
+      if (profile[order[i]]) return order[i];
+    }
+    for (let i = startIdx - 1; i >= 0; i--) {
+      if (profile[order[i]]) return order[i];
+    }
   }
   return preferred; // unreachable if profile has ≥1 tier
 };
@@ -108,7 +119,9 @@ export const buildRoutingDecision = (
 ): RoutingDecision => {
   const routed = profile[tier];
   if (!routed) {
-    throw new Error(`Profile "${profileName}" has no configuration for the ${tier} tier.`);
+    throw new Error(
+      `Profile "${profileName}" has no configuration for the ${tier} tier.`,
+    );
   }
   const { provider, modelId } = parseCanonicalModelRef(routed.model);
   const baseThinking =
@@ -130,6 +143,30 @@ export const buildRoutingDecision = (
   };
 };
 
+export const matchHighestTierRule = (
+  prompt: string,
+  rules: RoutingRule[] | undefined,
+): { tier: RouterTier; reasoning: string } | undefined => {
+  if (!rules) return undefined;
+  const tierRank: Record<RouterTier, number> = { low: 1, medium: 2, high: 3 };
+  let best: { tier: RouterTier; reasoning: string } | undefined;
+  for (const rule of rules) {
+    const matches = Array.isArray(rule.matches) ? rule.matches : [rule.matches];
+    const lowercaseMatches = matches.map((m) => m.toLowerCase());
+    if (containsAny(prompt, lowercaseMatches)) {
+      if (!best || tierRank[rule.tier] > tierRank[best.tier]) {
+        best = {
+          tier: rule.tier,
+          reasoning:
+            rule.reason ??
+            `Matched custom routing rule for: ${matches.join(', ')}`,
+        };
+      }
+    }
+  }
+  return best;
+};
+
 export const decideRouting = (
   context: Context,
   profileName: string,
@@ -140,6 +177,8 @@ export const decideRouting = (
   phaseBias = 0.5,
   rules?: RoutingRule[],
   isBudgetExceeded = false,
+  classifierResult?: { tier: RouterTier; reasoning: string },
+  ruleHit?: { tier: RouterTier; reasoning: string },
 ): RoutingDecision => {
   const prompt = getLastUserText(context).toLowerCase();
   const recentConversation = getRecentConversationText(context);
@@ -234,49 +273,25 @@ export const decideRouting = (
   let tier: RouterTier = 'medium';
   let reasoning = 'Defaulted to medium tier for general coding work.';
   let isRuleMatched = false;
+  let isClassifier = false;
 
   if (pinnedTier) {
     phase = phaseForTier(pinnedTier);
     tier = pinnedTier;
     reasoning = `Pinned to ${pinnedTier} tier via /router-pin.`;
   } else {
-    // Check custom rules first
-    if (rules) {
-      let highestTier: RouterTier | undefined;
-      let winningRule: RoutingRule | undefined;
-      const tierRank: Record<RouterTier, number> = {
-        low: 1,
-        medium: 2,
-        high: 3,
-      };
-
-      for (const rule of rules) {
-        const matches = Array.isArray(rule.matches)
-          ? rule.matches
-          : [rule.matches];
-        const lowercaseMatches = matches.map((m) => m.toLowerCase());
-        if (containsAny(prompt, lowercaseMatches)) {
-          if (!highestTier || tierRank[rule.tier] > tierRank[highestTier]) {
-            highestTier = rule.tier;
-            winningRule = rule;
-          }
-        }
-      }
-
-      if (winningRule && highestTier) {
-        tier = highestTier;
-        phase = phaseForTier(tier);
-        const matches = Array.isArray(winningRule.matches)
-          ? winningRule.matches
-          : [winningRule.matches];
-        reasoning =
-          winningRule.reason ??
-          `Matched custom routing rule for: ${matches.join(', ')}`;
-        isRuleMatched = true;
-      }
-    }
-
-    if (!isRuleMatched) {
+    const ruleMatch = ruleHit ?? matchHighestTierRule(prompt, rules);
+    if (ruleMatch) {
+      tier = ruleMatch.tier;
+      phase = phaseForTier(tier);
+      reasoning = ruleMatch.reasoning;
+      isRuleMatched = true;
+    } else if (classifierResult) {
+      tier = classifierResult.tier;
+      phase = phaseForTier(tier);
+      reasoning = `Classifier: ${classifierResult.reasoning}`;
+      isClassifier = true;
+    } else {
       // Sticky phase adjustments
       const highThreshold = Math.max(
         40,
@@ -364,8 +379,8 @@ export const decideRouting = (
     isBudgetForced = true;
   }
 
-  // Resolve to nearest available tier if the selected tier is disabled
-  const resolvedTier = resolveAvailableTier(profile, tier);
+  // [Slice 1] passes isBudgetExceeded for preferDown
+  const resolvedTier = resolveAvailableTier(profile, tier, isBudgetExceeded);
   if (resolvedTier !== tier) {
     reasoning = `Resolved from ${tier} to ${resolvedTier} tier (${tier} tier is not configured). Original: ${reasoning}`;
     phase = phaseForTier(resolvedTier);
@@ -379,7 +394,7 @@ export const decideRouting = (
     phase,
     reasoning,
     thinkingOverrides,
-    false,
+    isClassifier,
   );
   decision.isRuleMatched = isRuleMatched;
   decision.isBudgetForced = isBudgetForced;
@@ -429,13 +444,13 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
 
     const classifierContext: Context = {
       ...context,
-      messages: [{ role: 'user', content: classifierPrompt, timestamp: Date.now() }],
+      messages: [
+        { role: 'user', content: classifierPrompt, timestamp: Date.now() },
+      ],
     };
 
     const reasoningOption =
-      model.reasoning && thinking && thinking !== 'off'
-        ? thinking
-        : undefined;
+      model.reasoning && thinking && thinking !== 'off' ? thinking : undefined;
 
     const stream = streamSimple(model, classifierContext, {
       apiKey,
@@ -444,11 +459,8 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
     });
     let fullText = '';
     for await (const event of stream) {
-      if (
-        event.type === 'text_delta' &&
-        typeof (event as any).delta === 'string'
-      ) {
-        fullText += (event as any).delta;
+      if (event.type === 'text_delta') {
+        fullText += event.delta;
       }
     }
 

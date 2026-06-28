@@ -3,14 +3,14 @@ import type {
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
-import {
-  type RouterConfig,
-  type RouterPersistedState,
-  type RoutingDecision,
-  type RouterPinByProfile,
-  type RouterThinkingByProfile,
-  type RouterTier,
-  type CustomSessionEntry,
+import type {
+  RouterConfig,
+  RouterPersistedState,
+  RoutingDecision,
+  RouterPinByProfile,
+  RouterThinkingByProfile,
+  RouterTier,
+  CustomSessionEntry,
 } from './types';
 import {
   loadRouterConfig,
@@ -33,11 +33,11 @@ const routerExtension = (pi: ExtensionAPI) => {
   let lastDecision: RoutingDecision | undefined;
   let debugEnabled = false;
   let routerEnabled = false;
-  let selectedProfile: string | undefined = undefined;
+  let selectedProfile: string | undefined;
   let widgetEnabled = false;
   let lastRegisteredModels = '';
-  let pinnedTierByProfile: RouterPinByProfile = {};
-  let thinkingByProfile: RouterThinkingByProfile = {};
+  const pinnedTierByProfile: RouterPinByProfile = {};
+  const thinkingByProfile: RouterThinkingByProfile = {};
   let debugHistory: RoutingDecision[] = [];
   let lastNonRouterModel: string | undefined;
   let accumulatedCost = 0;
@@ -84,7 +84,23 @@ const routerExtension = (pi: ExtensionAPI) => {
   };
 
   const recordDebugDecision = (decision: RoutingDecision) => {
-    debugHistory = [...debugHistory, decision].slice(-MAX_DEBUG_HISTORY);
+    // Clone before pushing — Phase 2's cross-tier branch mutates the live `decision` reference in place
+    debugHistory = [...debugHistory, { ...decision }].slice(-MAX_DEBUG_HISTORY);
+    if (debugEnabled && lastExtensionContext) {
+      let source: string;
+      if (decision.isBudgetForced) source = 'budget';
+      else if (decision.isClassifier) source = 'classifier';
+      else if (decision.isRuleMatched) source = 'rule';
+      // ponytail: depends on the 'Pinned to ...' template literal in routing.ts decideRouting pin branch.
+      // 'includes' (not 'startsWith') so the resolveAvailableTier rewrite path
+      // ("Resolved from … Original: Pinned to …") also detects pin.
+      else if (decision.reasoning.includes('Pinned to')) source = 'pin';
+      else source = 'heuristic';
+      lastExtensionContext.ui.notify(
+        `router → ${decision.targetProvider}/${decision.targetModelId} [${decision.tier}, ${source}]`,
+        'info',
+      );
+    }
   };
 
   const getThinkingOverride = (profileName: string, tier: RouterTier) => {
@@ -282,9 +298,10 @@ const routerExtension = (pi: ExtensionAPI) => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     routerEnabled = ctx.model?.provider === 'router';
-    selectedProfile = ctx.model?.provider === 'router'
-      ? resolveProfileName(currentConfig, ctx.model.id)
-      : resolveProfileName(currentConfig, selectedProfile);
+    selectedProfile =
+      ctx.model?.provider === 'router'
+        ? resolveProfileName(currentConfig, ctx.model.id)
+        : resolveProfileName(currentConfig, selectedProfile);
     // Clear in-place to keep references intact
     for (const key of Object.keys(pinnedTierByProfile)) {
       delete pinnedTierByProfile[key];
