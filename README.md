@@ -47,21 +47,91 @@ Copy the example config to one of:
 - `~/.pi/agent/model-router.json` (Global)
 - `.pi/model-router.json` (Project-specific)
 
-### Basic Config Shape
+Both files are **merged**: global config acts as the base, and project-specific config deep-merges on top (per-profile, per-tier, per-field). This lets a project add profiles or override individual tiers without rewriting the entire global config.
+
+### Complete Config Example
+
+This example demonstrates every supported field. All fields except `profiles` are optional — a minimal config only needs a profile with at least one tier.
 
 ```json
 {
-  "classifierModel": "google/gemini-flash-latest",
+  "debug": false,
+  "classifierModel": {
+    "model": "google/gemini-flash-latest",
+    "thinking": "low"
+  },
+  "phaseBias": 0.5,
   "maxSessionBudget": 1.0,
+  "models": {
+    "gpt-pro": {
+      "model": "openai/gpt-5.4-pro",
+      "contextWindow": 256000,
+      "maxTokens": 64000,
+      "reasoning": true,
+      "thinkingLevels": ["high", "medium", "low"]
+    },
+    "flash": {
+      "model": "google/gemini-flash-latest",
+      "contextWindow": 1048576
+    },
+    "nano": {
+      "model": "openai/gpt-5.4-nano",
+      "contextWindow": 128000,
+      "maxTokens": 8192,
+      "reasoning": false
+    }
+  },
+  "rules": [
+    {
+      "matches": ["deploy", "production", "release"],
+      "tier": "high",
+      "reason": "Safety check for production tasks"
+    },
+    { "matches": "changelog", "tier": "low" }
+  ],
   "profiles": {
     "auto": {
-      "high": { "model": "openai/gpt-5.4-pro", "thinking": "high" },
-      "medium": { "model": "google/gemini-flash-latest", "thinking": "medium" },
-      "low": { "model": "openai/gpt-5.4-nano", "thinking": "low" }
+      "high": {
+        "model": "gpt-pro",
+        "thinking": "high",
+        "fallbacks": ["anthropic/claude-3-5-sonnet-20241022"]
+      },
+      "medium": {
+        "model": "flash",
+        "thinking": "medium",
+        "contextWindow": 200000,
+        "maxTokens": 16384
+      },
+      "low": {
+        "model": "nano",
+        "thinking": "low",
+        "reasoning": false,
+        "thinkingLevels": ["low"]
+      }
     }
   }
 }
 ```
+
+**Key points about this example:**
+
+- **`models`**: Defines reusable aliases (`gpt-pro`, `flash`, `nano`). Aliases can be referenced anywhere a model ref is accepted — in tier `model`, tier `fallbacks`, and `classifierModel`.
+- **`classifierModel`**: Can be a plain string (`"flash"`) or an object with a `thinking` level. Here it uses the object form to set the classifier's reasoning level.
+- **`rules`**: Each rule matches a string or array of strings (substring match, case-insensitive). When multiple rules match, the highest tier wins. Rules are skipped when a tier is pinned.
+- **`profiles.auto.high`**: Uses the `gpt-pro` alias and defines a same-tier `fallbacks` chain to a different provider (Anthropic).
+- **`profiles.auto.medium`**: Overrides the alias's resolved `contextWindow` and `maxTokens` at the tier level.
+- **`profiles.auto.low`**: Explicitly sets `reasoning: false` and restricts `thinkingLevels` to `low` only.
+- **Minimal config**: If you only need basic routing, a config like this is sufficient:
+  ```json
+  {
+    "profiles": {
+      "auto": {
+        "high": { "model": "openai/gpt-5.4-pro" },
+        "low": { "model": "openai/gpt-5.4-nano" }
+      }
+    }
+  }
+  ```
 
 ### Configuration Fields
 
@@ -74,6 +144,7 @@ Copy the example config to one of:
 | `models`                 | (Optional) Map of model aliases to definitions: `{ "alias": { "model": "provider/id", "contextWindow"?: number, "maxTokens"?: number, "reasoning"?: boolean, "thinkingLevels"?: ThinkingLevel[] } }`. Aliases are usable wherever a model ref string is accepted (tier `model`, tier `fallbacks`, `classifierModel`). |
 | `profiles`               | Map of profile definitions, each containing optional `high`, `medium`, and `low` tiers (at least one required).                                                                                                                                                                                                       |
 | `profiles.<name>.<tier>` | Tier config: `{ "model": "alias-or-ref", "thinking"?: ThinkingLevel, "fallbacks"?: string[], "contextWindow"?: number, "maxTokens"?: number, "reasoning"?: boolean, "thinkingLevels"?: ThinkingLevel[] }`. `fallbacks` are tried in order before cross-tier degradation.                                              |
+| `debug`                  | (Optional) Boolean. When `true`, auto-enables turn-by-turn routing notifications on every startup (equivalent to persisting `/router debug on` across restarts). Default `false`.                                                                                                                                     |
 
 Where `ThinkingLevel` is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`.
 
@@ -93,6 +164,86 @@ Where `ThinkingLevel` is one of `off`, `minimal`, `low`, `medium`, `high`, `xhig
 | `/router debug <on\|off>`         | Toggle turn-by-turn routing notifications (supports `toggle`, `clear`, `show`).                                     |
 | `/router reload`                  | Hot-reload the configuration JSON.                                                                                  |
 | `/router help`                    | Show usage help for all subcommands.                                                                                |
+| `/router <profile>`               | Shortcut to enable a profile directly (e.g. `/router auto`).                                                        |
+| `/router ?`                       | Alias for `/router help`.                                                                                           |
+
+## Advanced Behaviors
+
+The router performs several automatic adjustments that are invisible during normal use but are worth knowing about:
+
+### Same-Tier Fallback (e.g. quota / rate-limit hit)
+
+Every tier accepts a `fallbacks` array. When the primary model for a tier **fails** (rate limit, quota exhaustion, timeout, network error, etc.), the router automatically tries each fallback model **at the same tier** before considering a cross-tier downgrade. This means you can pair models from different providers at the same quality level.
+
+Example: if Anthropic Opus hits its limit, fall back to GPT-5.5 Pro — both at the `high` tier:
+
+```json
+"profiles": {
+  "auto": {
+    "high": {
+      "model": "anthropic/claude-opus",
+      "thinking": "high",
+      "fallbacks": ["openai/gpt-5.5-pro", "google/gemini-pro-latest"]
+    }
+  }
+}
+```
+
+The retry order is:
+
+1. **In-tier fallbacks first** — primary model, then each entry in `fallbacks` (same tier).
+2. **Cross-tier downgrade** — only if all in-tier models fail, the router drops to the next lower tier (`high` → `medium` → `low`) and repeats the process.
+
+This applies to any failure that occurs **before or during** streaming, including missing API keys, model-not-found, and mid-stream errors (if no content was received yet).
+
+### Custom & OpenAI-Compatible Providers
+
+The router works with **any** provider registered in pi's model registry — not just the built-in ones. If you use a custom OpenAI-compatible provider (e.g. via pi's manifest/`auto` AI settings, a self-hosted endpoint, or a proxy gateway), simply reference it using its registered `provider/model` name in your tier configs:
+
+```json
+"profiles": {
+  "auto": {
+    "high": {
+      "model": "my-proxy/llama-3.1-405b",
+      "fallbacks": ["openai/gpt-5.5-pro"]
+    },
+    "low": { "model": "auto/llama-3.1-8b" }
+  }
+}
+```
+
+The router resolves providers dynamically through `modelRegistry.find(provider, modelId)` at runtime — it doesn't hardcode any provider list. This means:
+
+- **Manifest-based providers** (e.g. `auto/...`, `my-proxy/...`) work the same as built-in providers like `openai` or `anthropic`.
+- **API keys & auth** are handled automatically by the registry's `getApiKeyAndHeaders()`, so whatever credentials you've configured in pi for that provider apply transparently.
+- **Capabilities** (context window, max tokens, reasoning support) are read from the registry, falling back to your `models` alias definitions or hardcoded defaults.
+- **Fallback chains can mix providers freely** — e.g. a self-hosted Llama as primary with an OpenAI model as fallback at the same tier.
+
+> **Note**: The only restriction is that you cannot point a tier's `model` or `fallbacks` back at the `router` provider itself (e.g. `router/auto`) — these are skipped to prevent infinite delegation loops.
+
+### Image-Attachment Tier Promotion
+
+If you attach an image and the routed tier's model (and all its fallbacks) does not support image input, the router **automatically promotes you to a higher tier** whose model does support images. This prevents errors when vision-capable models are only configured at higher tiers.
+
+### Google Thought-Signature Continuation Guard
+
+Google models with thinking/reasoning enabled require the **same model** to be used across a multi-turn tool-call sequence (the API rejects a "thought-signature replay" otherwise). The router detects these continuations and **reuses the exact same model** from the previous turn, overriding what the classifier or heuristics would have chosen. You may notice the model "sticks" during tool-heavy Google sessions — this is intentional.
+
+### Automatic Context Truncation
+
+The router reports the **maximum** context window and output token limit across all tiers to pi (so pi doesn't prematurely truncate). However, when the router delegates to a smaller-tier model, it **automatically truncates the conversation** to fit that model's context window. Truncation removes the oldest messages first while always preserving the system prompt and the latest user message.
+
+### Turn-End Auto-Restore
+
+If the router is enabled but a non-router model somehow got selected mid-conversation, the extension **automatically switches back** to the active router profile at the end of every turn.
+
+### `reasoning` Defaults to `true`
+
+When a model definition or tier config **omits** the `reasoning` field, the router **assumes the model supports reasoning**. Only an explicit `"reasoning": false` disables reasoning and restricts the available thinking levels.
+
+### Configuration Warnings
+
+If your config contains invalid entries (bad model refs, missing fields, invalid thinking levels, etc.), the router emits warnings at startup. These also appear in `/router status` output under a ⚠️ **Configuration Warnings** section.
 
 ## Documentation
 
