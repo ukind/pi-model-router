@@ -1,9 +1,11 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type {
   RoutingDecision,
   RouterConfig,
   RouterPinByProfile,
   RouterThinkingByProfile,
+  RouterTier,
 } from './types';
 
 const getEffectiveThinking = (
@@ -51,6 +53,20 @@ export const formatThinkingSummary = (
 export const formatModelRef = (ref: string | undefined): string => {
   return ref ?? 'none';
 };
+
+/**
+ * Unified "may not support '<level>'" warning body for both the event-driven
+ * (index.ts) and command-driven (commands.ts) thinking-override paths.
+ * `scope` is 'all' for the shift+tab event path (which always targets every
+ * tier) or a single tier name for `/router thinking <tier> <level>`.
+ */
+export const formatUnsupportedThinkingWarning = (
+  scope: 'all' | RouterTier,
+  level: ThinkingLevel,
+  unsupported: string[],
+): string =>
+  `Router thinking (${scope}) set to ${level}. ` +
+  `${unsupported.join(', ')} tier${unsupported.length > 1 ? 's' : ''} may not support '${level}'.`;
 
 export const updateStatus = (
   ctx: ExtensionContext,

@@ -14,13 +14,9 @@ import type {
   ClassifierConfig,
 } from './types';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import {
-  DEFAULT_CONTEXT_WINDOW,
-  DEFAULT_MAX_TOKENS,
-} from './constants';
+import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 
 export const ROUTER_TIERS = ['high', 'medium', 'low'] as const;
-
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [
   'off',
@@ -32,7 +28,11 @@ export const THINKING_LEVELS: readonly ThinkingLevel[] = [
 ];
 export const ROUTER_PIN_VALUES = ['auto', 'high', 'medium', 'low'] as const;
 
-export const DEFAULT_THINKING_LEVELS: readonly ThinkingLevel[] = ['high', 'medium', 'low'] as const;
+export const DEFAULT_THINKING_LEVELS: readonly ThinkingLevel[] = [
+  'high',
+  'medium',
+  'low',
+] as const;
 
 export const isObjectRecord = (
   value: unknown,
@@ -157,13 +157,17 @@ export const normalizeModelsMap = (
 
   for (const [alias, entry] of Object.entries(raw)) {
     if (!isObjectRecord(entry)) {
-      warnings.push(`Ignored invalid model definition "${alias}": expected an object.`);
+      warnings.push(
+        `Ignored invalid model definition "${alias}": expected an object.`,
+      );
       continue;
     }
 
     const model = typeof entry.model === 'string' ? entry.model.trim() : '';
     if (!model) {
-      warnings.push(`Model definition "${alias}" is missing the "model" field. Skipped.`);
+      warnings.push(
+        `Model definition "${alias}" is missing the "model" field. Skipped.`,
+      );
       continue;
     }
 
@@ -201,18 +205,33 @@ export const normalizeModelsMap = (
 
     let thinkingLevels: ThinkingLevel[] | undefined;
     if (Array.isArray(entry.thinkingLevels)) {
-      thinkingLevels = entry.thinkingLevels.filter(
-        (l): l is ThinkingLevel => isThinkingLevel(l),
+      thinkingLevels = entry.thinkingLevels.filter((l): l is ThinkingLevel =>
+        isThinkingLevel(l),
       );
       if (thinkingLevels.length === 0) thinkingLevels = undefined;
     }
 
-    result[alias] = { model, contextWindow, maxTokens, reasoning, thinkingLevels };
+    result[alias] = {
+      model,
+      contextWindow,
+      maxTokens,
+      reasoning,
+      thinkingLevels,
+    };
   }
 
   return result;
 };
 
+/**
+ * Normalize a single tier config entry.
+ *
+ * Note: `resolvedThinkingLevels` is advisory-only — the runtime delegation
+ * gate (`provider.ts`) consults `targetModel.reasoning` from the live model
+ * registry, not this config-derived set. The "may not support" warning is
+ * registry-driven (see `getUnsupportedTiers`). Config narrowing does not
+ * affect routing until runtime enforcement lands (deferred).
+ */
 export const normalizeTierConfig = (
   value: unknown,
   profileName: string,
@@ -248,16 +267,14 @@ export const normalizeTierConfig = (
     return undefined;
   }
 
-  const thinking = isThinkingLevel(value.thinking)
-    ? value.thinking
-    : 'medium';
+  const thinking = isThinkingLevel(value.thinking) ? value.thinking : 'medium';
   if (value.thinking !== undefined && !isThinkingLevel(value.thinking)) {
     warnings.push(
       `Profile "${profileName}" ${tier} tier has invalid thinking level. Defaulting to medium.`,
     );
   }
 
-  let fallbacks: string[] | undefined = undefined;
+  let fallbacks: string[] | undefined;
   if (Array.isArray(value.fallbacks)) {
     fallbacks = [];
     for (const f of value.fallbacks) {
@@ -282,7 +299,9 @@ export const normalizeTierConfig = (
       ? value.contextWindow
       : undefined;
   const resolvedContextWindow =
-    tierContextWindow ?? aliasDefinition?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+    tierContextWindow ??
+    aliasDefinition?.contextWindow ??
+    DEFAULT_CONTEXT_WINDOW;
 
   // Resolve maxTokens: tier config > alias > hardcoded default
   const tierMaxTokens =
@@ -368,9 +387,7 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
     );
 
     if (!high && !medium && !low) {
-      warnings.push(
-        `Profile "${name}" has no valid tiers. Skipped.`,
-      );
+      warnings.push(`Profile "${name}" has no valid tiers. Skipped.`);
       continue;
     }
 
@@ -428,7 +445,8 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
       );
     }
   } else if (isObjectRecord(rawClassifier)) {
-    const modelRef = typeof rawClassifier.model === 'string' ? rawClassifier.model.trim() : '';
+    const modelRef =
+      typeof rawClassifier.model === 'string' ? rawClassifier.model.trim() : '';
     if (modelRef) {
       const resolved = resolveModelRef(
         modelRef,
@@ -451,7 +469,9 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
         );
       }
     } else {
-      warnings.push('classifierModel object is missing the "model" field. Ignored.');
+      warnings.push(
+        'classifierModel object is missing the "model" field. Ignored.',
+      );
     }
   }
 
@@ -524,7 +544,9 @@ export const resolveContextWindow = (
       const { provider, modelId } = parseCanonicalModelRef(tierConfig.model);
       const registryModel = modelRegistry.find(provider, modelId);
       if (registryModel?.contextWindow) return registryModel.contextWindow;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   // 2-4. Pre-resolved during config normalization (tier > alias > hardcoded)
@@ -551,7 +573,9 @@ export const resolveMaxTokens = (
       const { provider, modelId } = parseCanonicalModelRef(tierConfig.model);
       const registryModel = modelRegistry.find(provider, modelId);
       if (registryModel?.maxTokens) return registryModel.maxTokens;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   // 2-4. Pre-resolved during config normalization (tier > alias > hardcoded)
@@ -577,18 +601,56 @@ export const collectProfileThinkingLevels = (
 };
 
 /**
- * Returns tier names whose models don't include the given thinking level
- * in their resolvedThinkingLevels.
+ * True iff some model in [primary, ...fallbacks] is in the registry with
+ * `.reasoning === true`. Mirrors `supportsReasoning` (provider.ts) but for a
+ * single tier. Invalid refs are skipped (config normalization warns).
+ *
+ * @see supportsReasoning (provider.ts)
+ */
+const tierSupportsReasoning = (
+  tierConfig: RoutedTierConfig,
+  modelRegistry: ExtensionContext['modelRegistry'],
+): boolean => {
+  const candidates = [tierConfig.model, ...(tierConfig.fallbacks ?? [])];
+  for (const ref of candidates) {
+    try {
+      const { provider, modelId } = parseCanonicalModelRef(ref);
+      if (modelRegistry.find(provider, modelId)?.reasoning) {
+        return true;
+      }
+    } catch {
+      // invalid ref — skip; config normalization already warned
+    }
+  }
+  return false;
+};
+
+/**
+ * Returns tier names whose models do NOT support reasoning at runtime.
+ *
+ * Mirrors the runtime delegation gate (`provider.ts`:
+ * `targetModel.reasoning && level !== 'off'`) — registry boolean, not the
+ * config-derived `resolvedThinkingLevels` set (which the runtime never
+ * reads, so it would be a false predictor). A tier is unsupported iff NO
+ * model in [primary, ...fallbacks] advertises `.reasoning`. Registry-miss
+ * counts as unsupported (runtime treats a missing model as a falsy gate).
+ *
+ * `level === 'off'` or an unavailable registry short-circuit to "all
+ * supported" — 'off' sends no reasoning anywhere; without a registry the
+ * predicate cannot be evaluated and a warning would be noise. The registry
+ * param is optional so 2-arg callers compile while warning sites are migrated.
  */
 export const getUnsupportedTiers = (
   profile: RouterProfile,
   level: ThinkingLevel,
+  modelRegistry?: ExtensionContext['modelRegistry'],
 ): string[] => {
+  if (level === 'off' || !modelRegistry) return [];
   const unsupported: string[] = [];
   for (const tier of ROUTER_TIERS) {
     const tierConfig = profile[tier];
     if (!tierConfig) continue;
-    if (!tierConfig.resolvedThinkingLevels?.includes(level)) {
+    if (!tierSupportsReasoning(tierConfig, modelRegistry)) {
       unsupported.push(tier);
     }
   }

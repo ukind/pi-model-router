@@ -18,7 +18,12 @@ import {
   isThinkingLevel,
   isRouterTier,
 } from './config';
-import type { RouterConfig, RouterProfile, ModelDefinition, RoutedTierConfig } from './types';
+import type {
+  RouterConfig,
+  RouterProfile,
+  ModelDefinition,
+  RoutedTierConfig,
+} from './types';
 
 vi.mock('@earendil-works/pi-coding-agent', () => ({
   getAgentDir: () => '/mock/agent/dir',
@@ -383,7 +388,11 @@ describe('config.ts', () => {
   describe('resolveContextWindow and resolveMaxTokens – additional coverage', () => {
     it('should return default when tier is missing from profile', () => {
       const profile: RouterProfile = {
-        high: { model: 'openai/gpt-4o', resolvedContextWindow: 60000, resolvedMaxTokens: 4000 },
+        high: {
+          model: 'openai/gpt-4o',
+          resolvedContextWindow: 60000,
+          resolvedMaxTokens: 4000,
+        },
       };
       expect(resolveContextWindow('low', profile, undefined)).toBe(128_000);
       expect(resolveMaxTokens('low', profile, undefined)).toBe(16_384);
@@ -391,35 +400,63 @@ describe('config.ts', () => {
 
     it('should fall back to resolvedContextWindow/MaxTokens when registry model has no values', () => {
       const profile: RouterProfile = {
-        high: { model: 'openai/gpt-4o', resolvedContextWindow: 60000, resolvedMaxTokens: 4000 },
+        high: {
+          model: 'openai/gpt-4o',
+          resolvedContextWindow: 60000,
+          resolvedMaxTokens: 4000,
+        },
       };
       const registryNoValues = {
         find: () => ({}),
-        getApiKeyAndHeaders: async () => ({ ok: false as const, error: 'not-mocked' }),
+        getApiKeyAndHeaders: async () => ({
+          ok: false as const,
+          error: 'not-mocked',
+        }),
       };
-      expect(resolveContextWindow('high', profile, registryNoValues as any)).toBe(60000);
-      expect(resolveMaxTokens('high', profile, registryNoValues as any)).toBe(4000);
+      expect(
+        resolveContextWindow('high', profile, registryNoValues as any),
+      ).toBe(60000);
+      expect(resolveMaxTokens('high', profile, registryNoValues as any)).toBe(
+        4000,
+      );
     });
 
     it('should catch parseCanonicalModelRef errors and return resolved values', () => {
       const profile: RouterProfile = {
-        high: { model: 'invalid-no-slash', resolvedContextWindow: 50000, resolvedMaxTokens: 3000 },
+        high: {
+          model: 'invalid-no-slash',
+          resolvedContextWindow: 50000,
+          resolvedMaxTokens: 3000,
+        },
       };
       const registryWithFind = {
         find: () => ({ contextWindow: 99999, maxTokens: 8888 }),
-        getApiKeyAndHeaders: async () => ({ ok: false as const, error: 'not-mocked' }),
+        getApiKeyAndHeaders: async () => ({
+          ok: false as const,
+          error: 'not-mocked',
+        }),
       };
       // parseCanonicalModelRef will throw for 'invalid-no-slash', so it falls through to resolved values
-      expect(resolveContextWindow('high', profile, registryWithFind as any)).toBe(50000);
-      expect(resolveMaxTokens('high', profile, registryWithFind as any)).toBe(3000);
+      expect(
+        resolveContextWindow('high', profile, registryWithFind as any),
+      ).toBe(50000);
+      expect(resolveMaxTokens('high', profile, registryWithFind as any)).toBe(
+        3000,
+      );
     });
   });
 
   describe('collectProfileThinkingLevels', () => {
     it('should collect thinking levels from all tiers', () => {
       const profile: RouterProfile = {
-        high: { model: 'openai/gpt-4o', resolvedThinkingLevels: ['high', 'xhigh'] },
-        medium: { model: 'openai/gpt-4o-mini', resolvedThinkingLevels: ['medium', 'low'] },
+        high: {
+          model: 'openai/gpt-4o',
+          resolvedThinkingLevels: ['high', 'xhigh'],
+        },
+        medium: {
+          model: 'openai/gpt-4o-mini',
+          resolvedThinkingLevels: ['medium', 'low'],
+        },
       };
       const levels = collectProfileThinkingLevels(profile);
       expect(levels.has('high')).toBe(true);
@@ -447,40 +484,86 @@ describe('config.ts', () => {
   });
 
   describe('getUnsupportedTiers', () => {
-    it('should return tiers that do not include the requested thinking level', () => {
-      const profile: RouterProfile = {
-        high: { model: 'openai/gpt-4o', resolvedThinkingLevels: ['high', 'xhigh'] },
-        medium: { model: 'openai/gpt-4o-mini', resolvedThinkingLevels: ['medium', 'low'] },
-        low: { model: 'openai/gpt-4o-micro', resolvedThinkingLevels: ['low'] },
-      };
-      const unsupported = getUnsupportedTiers(profile, 'xhigh');
-      expect(unsupported).toEqual(['medium', 'low']);
+    const buildRegistry = (reasoningMap: Record<string, boolean>) => ({
+      find: (provider: string, modelId: string) =>
+        reasoningMap[`${provider}/${modelId}`] !== undefined
+          ? ({
+              provider,
+              id: modelId,
+              reasoning: reasoningMap[`${provider}/${modelId}`],
+            } as any)
+          : undefined,
+      getApiKeyAndHeaders: async () => ({
+        ok: false as const,
+        error: 'not-mocked',
+      }),
     });
 
-    it('should return empty array if all tiers support the level', () => {
-      const profile: RouterProfile = {
-        high: { model: 'openai/gpt-4o', resolvedThinkingLevels: ['high', 'medium'] },
-        medium: { model: 'openai/gpt-4o-mini', resolvedThinkingLevels: ['medium'] },
-      };
-      const unsupported = getUnsupportedTiers(profile, 'medium');
-      expect(unsupported).toEqual([]);
-    });
-
-    it('should skip missing tiers (undefined tier config)', () => {
-      const profile: RouterProfile = {
-        high: { model: 'openai/gpt-4o', resolvedThinkingLevels: ['high'] },
-      };
-      const unsupported = getUnsupportedTiers(profile, 'low');
-      expect(unsupported).toEqual(['high']);
-    });
-
-    it('should treat tiers with undefined resolvedThinkingLevels as unsupported', () => {
+    it('returns tiers where no model (primary or fallback) advertises reasoning', () => {
       const profile: RouterProfile = {
         high: { model: 'openai/gpt-4o' },
-        medium: { model: 'openai/gpt-4o-mini', resolvedThinkingLevels: ['medium'] },
+        medium: {
+          model: 'openai/gpt-4o-mini',
+          fallbacks: ['openai/gpt-4o-micro'],
+        },
+        low: { model: 'openai/gpt-4o' },
       };
-      const unsupported = getUnsupportedTiers(profile, 'medium');
-      expect(unsupported).toEqual(['high']);
+      const registry = buildRegistry({
+        'openai/gpt-4o': true,
+        'openai/gpt-4o-mini': false,
+        'openai/gpt-4o-micro': false,
+      });
+      // high + low reason (gpt-4o); medium's primary + fallback both lack it
+      expect(getUnsupportedTiers(profile, 'high', registry as any)).toEqual([
+        'medium',
+      ]);
+    });
+
+    it('returns [] when each tier has at least one reasoning-capable model', () => {
+      const profile: RouterProfile = {
+        high: { model: 'openai/gpt-4o' },
+        // primary lacks reasoning but fallback provides it (D2 any-in-tier)
+        medium: { model: 'openai/gpt-4o-mini', fallbacks: ['openai/gpt-4o'] },
+      };
+      const registry = buildRegistry({
+        'openai/gpt-4o': true,
+        'openai/gpt-4o-mini': false,
+      });
+      expect(getUnsupportedTiers(profile, 'high', registry as any)).toEqual([]);
+    });
+
+    it('skips missing tiers (undefined tier config)', () => {
+      const profile: RouterProfile = {
+        high: { model: 'openai/gpt-4o' },
+      };
+      const registry = buildRegistry({ 'openai/gpt-4o': true });
+      expect(getUnsupportedTiers(profile, 'low', registry as any)).toEqual([]);
+    });
+
+    it('flags a tier whose models are all absent from the registry (registry-miss)', () => {
+      const profile: RouterProfile = {
+        high: { model: 'anthropic/claude-3' },
+      };
+      const registry = buildRegistry({});
+      // Registry-miss → unsupported matches runtime falsy gate
+      expect(getUnsupportedTiers(profile, 'high', registry as any)).toEqual([
+        'high',
+      ]);
+    });
+
+    it('returns [] for level "off" regardless of registry', () => {
+      const profile: RouterProfile = {
+        high: { model: 'openai/gpt-4o' },
+      };
+      const registry = buildRegistry({ 'openai/gpt-4o': false });
+      expect(getUnsupportedTiers(profile, 'off', registry as any)).toEqual([]);
+    });
+
+    it('returns [] when registry is undefined', () => {
+      const profile: RouterProfile = {
+        high: { model: 'openai/gpt-4o' },
+      };
+      expect(getUnsupportedTiers(profile, 'high', undefined)).toEqual([]);
     });
   });
 
@@ -492,7 +575,9 @@ describe('config.ts', () => {
         },
         classifierModel: { model: 'openai/gpt-4o', thinking: 'low' },
       };
-      const { config, warnings } = normalizeConfig(raw as unknown as RouterConfig);
+      const { config, warnings } = normalizeConfig(
+        raw as unknown as RouterConfig,
+      );
       expect(config.classifierModel?.model).toBe('openai/gpt-4o');
       expect(config.classifierModel?.thinking).toBe('low');
       expect(warnings).toEqual([]);
@@ -505,7 +590,9 @@ describe('config.ts', () => {
         },
         classifierModel: { model: 'openai/gpt-4o', thinking: 'super-invalid' },
       };
-      const { config, warnings } = normalizeConfig(raw as unknown as RouterConfig);
+      const { config, warnings } = normalizeConfig(
+        raw as unknown as RouterConfig,
+      );
       expect(config.classifierModel?.model).toBe('openai/gpt-4o');
       expect(config.classifierModel?.thinking).toBeUndefined();
       expect(warnings.length).toBe(1);
@@ -519,7 +606,9 @@ describe('config.ts', () => {
         },
         classifierModel: { thinking: 'high' },
       };
-      const { config, warnings } = normalizeConfig(raw as unknown as RouterConfig);
+      const { config, warnings } = normalizeConfig(
+        raw as unknown as RouterConfig,
+      );
       expect(config.classifierModel).toBeUndefined();
       expect(warnings.length).toBe(1);
       expect(warnings[0]).toContain('missing the "model" field');

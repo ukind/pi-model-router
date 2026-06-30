@@ -4,6 +4,7 @@ import {
   formatPinSummary,
   formatThinkingSummary,
   formatModelRef,
+  formatUnsupportedThinkingWarning,
   getDecisionFlags,
   updateStatus,
 } from './ui';
@@ -64,6 +65,28 @@ describe('ui.ts', () => {
     it('should return model name or none', () => {
       expect(formatModelRef('openai/gpt-4o')).toBe('openai/gpt-4o');
       expect(formatModelRef(undefined)).toBe('none');
+    });
+  });
+
+  describe('formatUnsupportedThinkingWarning', () => {
+    it('formats a single unsupported tier with the all-tier scope', () => {
+      expect(formatUnsupportedThinkingWarning('all', 'high', ['low'])).toBe(
+        "Router thinking (all) set to high. low tier may not support 'high'.",
+      );
+    });
+
+    it('pluralizes "tiers" for multiple unsupported tiers', () => {
+      expect(
+        formatUnsupportedThinkingWarning('medium', 'xhigh', ['medium', 'low']),
+      ).toBe(
+        "Router thinking (medium) set to xhigh. medium, low tiers may not support 'xhigh'.",
+      );
+    });
+
+    it('renders a single-tier scope label', () => {
+      expect(formatUnsupportedThinkingWarning('low', 'high', ['low'])).toBe(
+        "Router thinking (low) set to high. low tier may not support 'high'.",
+      );
     });
   });
 

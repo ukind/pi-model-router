@@ -652,28 +652,36 @@ describe('commands.ts', () => {
       expect(actions.syncPiThinkingLevel).toHaveBeenCalledWith('medium');
     });
 
-    it('should warn about unsupported tiers', async () => {
+    it('should warn about unsupported tiers using registry predicate', async () => {
       const pi = buildMockPi();
       const state = buildDefaultState();
-      // Set up profile with resolvedThinkingLevels that exclude 'xhigh'
       state.currentConfig.profiles.balanced = {
-        high: {
-          model: 'openai/gpt-4o',
-          resolvedThinkingLevels: ['high', 'medium', 'low'],
-        },
-        medium: {
-          model: 'openai/gpt-4o-mini',
-          resolvedThinkingLevels: ['high', 'medium', 'low'],
-        },
+        high: { model: 'openai/gpt-4o' },
+        medium: { model: 'openai/gpt-4o-mini' },
       };
       const actions = buildMockActions();
       const ctx = buildMockCtx();
+      // Override registry: gpt-4o supports reasoning, gpt-4o-mini does not
+      ctx.modelRegistry.find = vi
+        .fn()
+        .mockImplementation((provider: string, modelId: string) => {
+          if (modelId === 'gpt-4o')
+            return {
+              provider,
+              id: modelId,
+              reasoning: true,
+              input: ['text', 'image'],
+            };
+          if (modelId === 'gpt-4o-mini')
+            return { provider, id: modelId, reasoning: false, input: ['text'] };
+          return null;
+        });
 
       registerCommands(pi as any, state as any, actions as any);
       const cmd = pi.getRegisteredCommand();
 
       await cmd.handler('thinking xhigh', ctx as any);
-      // Should warn that tiers don't support xhigh
+      // medium tier should be flagged (gpt-4o-mini lacks reasoning)
       expect(ctx.ui.notify).toHaveBeenCalledWith(
         expect.stringContaining("may not support 'xhigh'"),
         'warning',

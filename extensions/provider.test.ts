@@ -448,7 +448,9 @@ describe('provider.ts', () => {
 
     it('should fall back when auth fails for primary model', async () => {
       let authCallCount = 0;
-      mockState.currentModelRegistry.getApiKeyAndHeaders = async (model: any) => {
+      mockState.currentModelRegistry.getApiKeyAndHeaders = async (
+        model: any,
+      ) => {
         authCallCount++;
         if (model.id === 'gpt-4o-mini') {
           return { ok: false, error: 'auth-error' };
@@ -465,7 +467,10 @@ describe('provider.ts', () => {
       vi.mocked(streamSimple).mockReturnValue(
         (async function* () {
           yield { type: 'text_delta', delta: 'fallback answer' };
-          yield { type: 'done', message: { usage: { cost: { total: 0.001 } } } };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.001 } } },
+          };
         })() as any,
       );
 
@@ -488,7 +493,10 @@ describe('provider.ts', () => {
     });
 
     it('should skip model not found in registry and try fallback', async () => {
-      mockState.currentModelRegistry.find = (provider: string, modelId: string) => {
+      mockState.currentModelRegistry.find = (
+        provider: string,
+        modelId: string,
+      ) => {
         if (modelId === 'gpt-4o-mini') return undefined; // primary not found
         return { provider, id: modelId, input: ['text', 'image'] };
       };
@@ -502,7 +510,10 @@ describe('provider.ts', () => {
       vi.mocked(streamSimple).mockReturnValue(
         (async function* () {
           yield { type: 'text_delta', delta: 'answer from fallback' };
-          yield { type: 'done', message: { usage: { cost: { total: 0.002 } } } };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.002 } } },
+          };
         })() as any,
       );
 
@@ -555,6 +566,46 @@ describe('provider.ts', () => {
       expect(errorEvent).toBeDefined();
       expect(errorEvent.error.errorMessage).toContain('model unavailable');
       expect(mockActions.persistState).toHaveBeenCalled();
+    });
+
+    it('should throw enriched error when all candidates are silently skipped', async () => {
+      // Profile whose only tier self-references the router — every candidate
+      // is skipped by the router-self-ref guard; no real attempt sets lastError.
+      mockState.currentConfig.profiles.selfRef = {
+        high: { model: 'router/selfRef' },
+      };
+      mockState.pinnedTierByProfile['selfRef'] = 'high';
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      const model = {
+        id: 'selfRef',
+        api: 'router-api',
+        provider: 'router',
+      } as any;
+      const context = {
+        messages: [{ role: 'user', content: 'hello' }],
+      } as any;
+
+      registeredProviderOptions.streamSimple(model, context);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const errorEvent = stream.events.find((e: any) => e.type === 'error');
+      expect(errorEvent).toBeDefined();
+      expect(errorEvent.error.errorMessage).toContain(
+        'All candidates were skipped',
+      );
+      expect(errorEvent.error.errorMessage).toContain(
+        'skipped router self-reference',
+      );
+      expect(mockActions.persistState).toHaveBeenCalledTimes(1);
+      // All-skip path never attempts a real model call.
+      expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
     });
   });
 });

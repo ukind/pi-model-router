@@ -22,7 +22,11 @@ import {
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
 import { isRouterPersistedState, buildPersistedState } from './state';
-import { updateStatus, formatModelRef } from './ui';
+import {
+  updateStatus,
+  formatModelRef,
+  formatUnsupportedThinkingWarning,
+} from './ui';
 import { registerCommands } from './commands';
 import { registerRouterProvider } from './provider';
 
@@ -509,11 +513,11 @@ const routerExtension = (pi: ExtensionAPI) => {
       const unsupported = getUnsupportedTiers(
         currentConfig.profiles[selectedProfile],
         event.level,
+        ctx.modelRegistry,
       );
       if (unsupported.length > 0) {
         ctx.ui.notify(
-          `Router thinking (all) set to ${event.level}. ` +
-            `${unsupported.join(', ')} tier${unsupported.length > 1 ? 's' : ''} may not support '${event.level}'.`,
+          formatUnsupportedThinkingWarning('all', event.level, unsupported),
           'warning',
         );
       }

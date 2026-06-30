@@ -375,11 +375,15 @@ export const registerRouterProvider = (
           const originalTier = decision.tier;
 
           let lastError: unknown;
+          const skipReasons: string[] = [];
           let success = false;
 
           outer: for (const currentTier of tierChain) {
             const tierConfig = profile[currentTier];
-            if (!tierConfig) continue;
+            if (!tierConfig) {
+              skipReasons.push(`${currentTier} tier not configured`);
+              continue;
+            }
 
             let modelsToTry = [
               tierConfig.model,
@@ -399,7 +403,12 @@ export const registerRouterProvider = (
                   return false;
                 }
               });
-              if (modelsToTry.length === 0) continue;
+              if (modelsToTry.length === 0) {
+                skipReasons.push(
+                  `${currentTier} tier: no image-capable models`,
+                );
+                continue;
+              }
             }
 
             for (let i = 0; i < modelsToTry.length; i++) {
@@ -407,7 +416,10 @@ export const registerRouterProvider = (
               const { provider: targetProvider, modelId: targetModelId } =
                 parseCanonicalModelRef(modelRef);
 
-              if (targetProvider === 'router') continue;
+              if (targetProvider === 'router') {
+                skipReasons.push(`skipped router self-reference: ${modelRef}`);
+                continue;
+              }
 
               const targetModel = state.currentModelRegistry.find(
                 targetProvider,
@@ -544,7 +556,11 @@ export const registerRouterProvider = (
           if (!success) {
             throw (
               lastError ||
-              new Error('Failed to delegate to any model in the chain.')
+              new Error(
+                skipReasons.length > 0
+                  ? `Failed to delegate to any model in the chain. All candidates were skipped: ${skipReasons.join('; ')}`
+                  : 'Failed to delegate to any model in the chain.',
+              )
             );
           }
 

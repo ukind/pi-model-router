@@ -24,6 +24,7 @@ import {
   formatThinkingSummary,
   formatModelRef,
   formatDecision,
+  formatUnsupportedThinkingWarning,
 } from './ui';
 
 export const registerCommands = (
@@ -96,9 +97,10 @@ export const registerCommands = (
       ).map((value) => ({
         value,
         label: value,
-        description: value === 'auto'
-          ? 'Restore auto-routing (clear pin) for the active profile'
-          : `Pin active profile to ${value} tier`,
+        description:
+          value === 'auto'
+            ? 'Restore auto-routing (clear pin) for the active profile'
+            : `Pin active profile to ${value} tier`,
       }));
       return items.length > 0 ? items : null;
     }
@@ -120,9 +122,10 @@ export const registerCommands = (
           .map((v) => ({
             value: v,
             label: v,
-            description: v === 'auto'
-              ? 'Restore default thinking level'
-              : `Set thinking level to ${v}`,
+            description:
+              v === 'auto'
+                ? 'Restore default thinking level'
+                : `Set thinking level to ${v}`,
           })),
         ...tierValues
           .filter((v) => v.startsWith(token))
@@ -146,15 +149,15 @@ export const registerCommands = (
         .map((v) => ({
           value: `${tier} ${v}`,
           label: `${tier} ${v}`,
-          description: v === 'auto'
-            ? `Restore default thinking level for ${tier} tier`
-            : `Set thinking level to ${v} for ${tier} tier`,
+          description:
+            v === 'auto'
+              ? `Restore default thinking level for ${tier} tier`
+              : `Set thinking level to ${v} for ${tier} tier`,
         }));
     }
 
     return null;
   };
-
 
   const handleStatus = async (args: string[], ctx: ExtensionContext) => {
     if (args.length > 0) {
@@ -224,7 +227,10 @@ export const registerCommands = (
   const handlePin = async (args: string[], ctx: ExtensionContext) => {
     const currentProfile = state.selectedProfile;
     if (!currentProfile) {
-      ctx.ui.notify('No router profile is active. Select a router model first.', 'error');
+      ctx.ui.notify(
+        'No router profile is active. Select a router model first.',
+        'error',
+      );
       return;
     }
     if (args.length === 0) {
@@ -241,10 +247,7 @@ export const registerCommands = (
     }
 
     if (args.length > 1) {
-      ctx.ui.notify(
-        'Usage: /router pin <high|medium|low|auto>',
-        'error',
-      );
+      ctx.ui.notify('Usage: /router pin <high|medium|low|auto>', 'error');
       return;
     }
 
@@ -277,7 +280,10 @@ export const registerCommands = (
   const handleThinking = async (args: string[], ctx: ExtensionContext) => {
     const currentProfile = state.selectedProfile;
     if (!currentProfile) {
-      ctx.ui.notify('No router profile is active. Select a router model first.', 'error');
+      ctx.ui.notify(
+        'No router profile is active. Select a router model first.',
+        'error',
+      );
       return;
     }
     if (args.length === 0) {
@@ -299,7 +305,7 @@ export const registerCommands = (
       return;
     }
 
-    let tier: RouterTier | 'all' | undefined = undefined;
+    let tier: RouterTier | 'all' | undefined;
     let levelValue = '';
 
     const tierValues = ['high', 'medium', 'low'];
@@ -348,7 +354,8 @@ export const registerCommands = (
       if (!state.thinkingByProfile[currentProfile])
         state.thinkingByProfile[currentProfile] = {};
       if (nextLevel)
-        state.thinkingByProfile[currentProfile]![tier as RouterTier] = nextLevel;
+        state.thinkingByProfile[currentProfile]![tier as RouterTier] =
+          nextLevel;
       else delete state.thinkingByProfile[currentProfile]![tier as RouterTier];
     }
     if (
@@ -370,11 +377,11 @@ export const registerCommands = (
       const unsupported = getUnsupportedTiers(
         state.currentConfig.profiles[currentProfile],
         nextLevel,
+        ctx.modelRegistry,
       );
       if (unsupported.length > 0) {
         ctx.ui.notify(
-          `Router thinking (${tier}) set to ${nextLevel}. ` +
-            `${unsupported.join(', ')} tier${unsupported.length > 1 ? 's' : ''} may not support '${nextLevel}'.`,
+          formatUnsupportedThinkingWarning(tier!, nextLevel, unsupported),
           'warning',
         );
       }
