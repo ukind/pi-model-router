@@ -9,6 +9,9 @@ import type {
   RoutingDecision,
   RoutingRule,
   RouterThinkingByTier,
+  ClassifierResult,
+  ClassifierFailureReason,
+  ConfidenceLevel,
 } from './types';
 import { parseCanonicalModelRef, isRouterTier } from './config';
 
@@ -177,7 +180,7 @@ export const decideRouting = (
   phaseBias = 0.5,
   rules?: RoutingRule[],
   isBudgetExceeded = false,
-  classifierResult?: { tier: RouterTier; reasoning: string },
+  classifierResult?: ClassifierResult,
   ruleHit?: { tier: RouterTier; reasoning: string },
 ): RoutingDecision => {
   const prompt = getLastUserText(context).toLowerCase();
@@ -274,6 +277,8 @@ export const decideRouting = (
   let reasoning = 'Defaulted to medium tier for general coding work.';
   let isRuleMatched = false;
   let isClassifier = false;
+  let isVetoed = false;
+  let vetoReason: 'explicit-hint' | undefined;
 
   if (pinnedTier) {
     phase = phaseForTier(pinnedTier);
@@ -287,10 +292,26 @@ export const decideRouting = (
       reasoning = ruleMatch.reasoning;
       isRuleMatched = true;
     } else if (classifierResult) {
-      tier = classifierResult.tier;
-      phase = phaseForTier(tier);
-      reasoning = `Classifier: ${classifierResult.reasoning}`;
       isClassifier = true;
+      let candidateTier = classifierResult.tier;
+      // Veto: explicit hints override classifier (Decision 1)
+      const promptHasHighHint = containsAny(prompt, explicitHighHints);
+      const promptHasLowHint = containsAny(prompt, explicitLowHints);
+      if (promptHasHighHint && candidateTier !== 'high') {
+        candidateTier = 'high';
+        isVetoed = true;
+        vetoReason = 'explicit-hint';
+      } else if (promptHasLowHint && candidateTier !== 'low') {
+        candidateTier = 'low';
+        isVetoed = true;
+        vetoReason = 'explicit-hint';
+      }
+      tier = candidateTier;
+      // Phase decoupling (Decision 6): preserve currentPhase, don't force-remap via phaseForTier
+      phase = previousDecision?.phase ?? phaseForTier(tier);
+      reasoning = isVetoed
+        ? `Classifier: ${classifierResult.reasoning} (vetoed: explicit-hint forced ${tier})`
+        : `Classifier: ${classifierResult.reasoning}`;
     } else {
       // Sticky phase adjustments
       const highThreshold = Math.max(
@@ -398,30 +419,103 @@ export const decideRouting = (
   );
   decision.isRuleMatched = isRuleMatched;
   decision.isBudgetForced = isBudgetForced;
+  // Thread classifier provenance when classifier was the source
+  if (isClassifier && classifierResult) {
+    decision.confidence = classifierResult.confidence;
+    decision.rawText = classifierResult.rawText;
+    decision.failureReason = classifierResult.failureReason;
+    if (isVetoed) {
+      decision.isVetoed = true;
+      decision.vetoReason = vetoReason;
+    }
+  }
   return decision;
 };
 
+export const parseClassifierOutput = (
+  rawText: string,
+): {
+  tier?: RouterTier;
+  confidence: ConfidenceLevel;
+  reasoning: string;
+  failureReason: ClassifierFailureReason;
+} => {
+  const normalized = rawText.replace(/\r\n/g, '\n').trim();
+  const stripMarkdown = (line: string): string =>
+    line
+      .replace(/^[\s*#>`]*/, '')
+      .replace(/[*`]/g, '')
+      .trim();
+
+  const lines = normalized.split('\n').map(stripMarkdown);
+  const tierLine = lines.find((l) => /^tier:\s*/i.test(l));
+  const confidenceLine = lines.find((l) => /^confidence:\s*/i.test(l));
+  const reasoningLine = lines.find((l) => /^reasoning:\s*/i.test(l));
+
+  if (!tierLine) {
+    return {
+      confidence: 'medium',
+      reasoning: '',
+      failureReason: 'unparseable',
+    };
+  }
+
+  const tierRaw = tierLine
+    .replace(/^tier:\s*/i, '')
+    .trim()
+    .toLowerCase();
+  const tierWord = tierRaw.split(/\s+/)[0].replace(/[.!;,]+$/, '');
+  if (!isRouterTier(tierWord)) {
+    return {
+      confidence: 'medium',
+      reasoning: '',
+      failureReason: 'unparseable',
+    };
+  }
+
+  let confidence: ConfidenceLevel = 'medium';
+  if (confidenceLine) {
+    const confRaw = confidenceLine
+      .replace(/^confidence:\s*/i, '')
+      .trim()
+      .toLowerCase();
+    const confWord = confRaw.split(/\s+/)[0].replace(/[.!;,]+$/, '');
+    if (confWord === 'high' || confWord === 'medium' || confWord === 'low') {
+      confidence = confWord;
+    }
+  }
+
+  let reasoning = 'Classifier decision.';
+  if (reasoningLine) {
+    const reasoningText = reasoningLine.replace(/^reasoning:\s*/i, '');
+    if (reasoningText.trim()) reasoning = reasoningText.trim();
+  }
+
+  return { tier: tierWord, confidence, reasoning, failureReason: 'success' };
+};
+
 export const runClassifier = async (
-  classifierModelRef: string,
+  refs: string[],
   modelRegistry: ExtensionContext['modelRegistry'],
   context: Context,
   currentPhase?: RouterPhase,
   thinking?: ThinkingLevel,
-): Promise<{ tier: RouterTier; reasoning: string } | undefined> => {
-  try {
-    const { provider, modelId } = parseCanonicalModelRef(classifierModelRef);
-    const model = modelRegistry.find(provider, modelId);
-    if (!model) return undefined;
+): Promise<ClassifierResult | undefined> => {
+  for (const ref of refs) {
+    try {
+      const { provider, modelId } = parseCanonicalModelRef(ref);
+      const model = modelRegistry.find(provider, modelId);
+      if (!model) continue;
 
-    const auth = await modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok || !auth.apiKey) return undefined;
-    const apiKey = auth.apiKey;
-    const headers = auth.headers;
+      const auth = await modelRegistry.getApiKeyAndHeaders(model);
+      if (!auth.ok || !auth.apiKey) continue;
+      const apiKey = auth.apiKey;
+      const headers = auth.headers;
 
-    const promptText = getLastUserText(context);
-    const historyText = getRecentConversationText(context, 4);
+      const promptText = getLastUserText(context);
+      const historyText = getRecentConversationText(context, 4);
 
-    const classifierPrompt = `You are a model router classifier. Your job is to categorize the user's latest request into one of three tiers: "high", "medium", or "low".
+      const classifierPrompt = `You are a model router classifier. Your job is to categorize the user's latest request into one of three tiers: "high", "medium", or "low".
 
 Tiers:
 - high: Architecture, design, planning, tradeoff analysis, broad debugging, large refactors, codebase research.
@@ -435,54 +529,61 @@ ${historyText}
 Latest user message:
 ${promptText}
 
-Return your decision in exactly two lines:
+Return your decision in exactly three lines:
 Tier: [high|medium|low]
+Confidence: [high|medium|low]
 Reasoning: [one short sentence]
 
 ${currentPhase === 'planning' ? 'Consider that the conversation is currently in a planning phase. Bias toward "high" unless the request is clearly a simple implementation or summary.' : ''}
 ${currentPhase === 'implementation' ? 'Consider that the conversation is currently in an implementation phase. Bias toward "medium" unless the request is clearly planning or a simple summary.' : ''}`;
 
-    const classifierContext: Context = {
-      ...context,
-      messages: [
-        { role: 'user', content: classifierPrompt, timestamp: Date.now() },
-      ],
-    };
+      const classifierContext: Context = {
+        ...context,
+        messages: [
+          { role: 'user', content: classifierPrompt, timestamp: Date.now() },
+        ],
+      };
 
-    const reasoningOption =
-      model.reasoning && thinking && thinking !== 'off' ? thinking : undefined;
+      const reasoningOption =
+        model.reasoning && thinking && thinking !== 'off'
+          ? thinking
+          : undefined;
 
-    const stream = streamSimple(model, classifierContext, {
-      apiKey,
-      headers,
-      ...(reasoningOption ? { reasoning: reasoningOption } : {}),
-    });
-    let fullText = '';
-    for await (const event of stream) {
-      if (event.type === 'text_delta') {
-        fullText += event.delta;
+      const stream = streamSimple(model, classifierContext, {
+        apiKey,
+        headers,
+        ...(reasoningOption ? { reasoning: reasoningOption } : {}),
+      });
+      let fullText = '';
+      let contentReceived = false;
+      for await (const event of stream) {
+        if (event.type === 'error' && !contentReceived) {
+          break;
+        }
+        if (event.type === 'text_delta' || event.type === 'thinking_delta') {
+          if (event.type === 'text_delta') fullText += event.delta;
+          contentReceived = true;
+        }
       }
-    }
 
-    const lines = fullText.trim().split('\n');
-    const tierLine = lines.find((l) => l.toLowerCase().startsWith('tier:'));
-    const reasoningLine = lines.find((l) =>
-      l.toLowerCase().startsWith('reasoning:'),
-    );
+      if (!contentReceived) continue;
 
-    if (tierLine) {
-      const tierValue = tierLine.split(':')[1].trim().toLowerCase();
-      if (isRouterTier(tierValue)) {
-        return {
-          tier: tierValue,
-          reasoning: reasoningLine
-            ? reasoningLine.split(':')[1].trim()
-            : 'Classifier decision.',
-        };
+      const parsed = parseClassifierOutput(fullText);
+      if (parsed.failureReason === 'unparseable') {
+        return undefined;
       }
+
+      return {
+        tier: parsed.tier!,
+        confidence: parsed.confidence,
+        reasoning: parsed.reasoning,
+        rawText: fullText,
+        failureReason: 'success',
+      };
+    } catch (error) {
+      // ponytail: infra failure (invalid ref / auth reject / stream threw) — try next ref
+      void error;
     }
-  } catch (error) {
-    // Ignore classifier errors and fall back to heuristics
   }
   return undefined;
 };

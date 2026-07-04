@@ -20,6 +20,7 @@ import type {
   RouterTier,
   RouterPinByProfile,
   RouterThinkingByProfile,
+  ClassifierResult,
 } from './types';
 import {
   profileNames,
@@ -250,12 +251,14 @@ export const registerRouterProvider = (
             ? matchHighestTierRule(prompt, state.currentConfig.rules)
             : undefined;
 
-          let classifierResult:
-            | { tier: RouterTier; reasoning: string }
-            | undefined;
+          let classifierResult: ClassifierResult | undefined;
           if (!pinnedTier && !ruleHit && state.currentConfig.classifierModel) {
-            classifierResult = await runClassifier(
+            const classifierRefs = [
               state.currentConfig.classifierModel.model,
+              ...(state.currentConfig.classifierModel.fallbacks ?? []),
+            ];
+            classifierResult = await runClassifier(
+              classifierRefs,
               state.currentModelRegistry,
               context,
               state.lastDecision?.phase,
@@ -357,7 +360,8 @@ export const registerRouterProvider = (
           }
 
           state.lastDecision = decision;
-          actions.recordDebugDecision(decision);
+          // recordDebugDecision moved post-stream (Phase 5) so debug history
+          // captures the actual streamed model after cross-tier fallback.
 
           const effectiveThinking =
             actions.getThinkingOverride(model.id, decision.tier) ??
@@ -563,6 +567,11 @@ export const registerRouterProvider = (
               )
             );
           }
+
+          // Phase 5: record debug decision post-stream so history reflects
+          // actual streamed model (after cross-tier fallback may have mutated
+          // decision.tier/provider/model/label).
+          actions.recordDebugDecision(decision);
 
           stream.end();
         } catch (error) {

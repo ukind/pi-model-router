@@ -100,8 +100,17 @@ const routerExtension = (pi: ExtensionAPI) => {
       // ("Resolved from … Original: Pinned to …") also detects pin.
       else if (decision.reasoning.includes('Pinned to')) source = 'pin';
       else source = 'heuristic';
+      // Phase 5: append confidence + failureReason when classifier-driven (observability)
+      const provenance =
+        decision.isClassifier && decision.confidence
+          ? ` (confidence: ${decision.confidence}${
+              decision.failureReason && decision.failureReason !== 'success'
+                ? `, ${decision.failureReason}`
+                : ''
+            })`
+          : '';
       lastExtensionContext.ui.notify(
-        `router → ${decision.targetProvider}/${decision.targetModelId} [${decision.tier}, ${source}]`,
+        `router → ${decision.targetProvider}/${decision.targetModelId} [${decision.tier}, ${source}]${provenance}`,
         'info',
       );
     }

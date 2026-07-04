@@ -95,6 +95,18 @@ const mergeTier = (
   return { ...existing, ...next };
 };
 
+// Mirrors mergeTier per-field spread. fallbacks use flat-replace semantics
+// (project replaces global), consistent with mergeTier field-replace precedent.
+const mergeClassifier = (
+  base: ClassifierConfig | undefined,
+  next: Partial<ClassifierConfig> | undefined,
+): ClassifierConfig | undefined => {
+  if (!base && !next) return undefined;
+  if (!next) return base;
+  if (!base) return next as ClassifierConfig;
+  return { ...base, ...next };
+};
+
 export const mergeConfig = (
   base: RouterConfig,
   override: Partial<RouterConfig>,
@@ -117,7 +129,10 @@ export const mergeConfig = (
 
   return {
     debug: override.debug ?? base.debug,
-    classifierModel: override.classifierModel ?? base.classifierModel,
+    classifierModel: mergeClassifier(
+      base.classifierModel,
+      override.classifierModel,
+    ),
     phaseBias: override.phaseBias ?? base.phaseBias,
     maxSessionBudget: override.maxSessionBudget ?? base.maxSessionBudget,
     rules: override.rules ?? base.rules,
@@ -462,7 +477,33 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
             `classifierModel has invalid thinking level "${String(rawClassifier.thinking)}". Ignored.`,
           );
         }
-        classifierModel = { model: resolved.canonicalRef, thinking };
+        // Mirrors tier fallback loop: alias-resolve + validate + warn-skip.
+        let classifierFallbacks: string[] | undefined;
+        if (Array.isArray(rawClassifier.fallbacks)) {
+          classifierFallbacks = [];
+          for (const f of rawClassifier.fallbacks) {
+            if (typeof f === 'string') {
+              const resolvedFallback = resolveModelRef(
+                f,
+                hasModels ? normalizedModels : undefined,
+              );
+              try {
+                parseCanonicalModelRef(resolvedFallback.canonicalRef);
+                classifierFallbacks.push(resolvedFallback.canonicalRef);
+              } catch (error) {
+                warnings.push(
+                  `Invalid classifier fallback model "${f}": ${error instanceof Error ? error.message : String(error)}`,
+                );
+              }
+            }
+          }
+          if (classifierFallbacks.length === 0) classifierFallbacks = undefined;
+        }
+        classifierModel = {
+          model: resolved.canonicalRef,
+          thinking,
+          fallbacks: classifierFallbacks,
+        };
       } catch (error) {
         warnings.push(
           `Invalid classifierModel: ${error instanceof Error ? error.message : String(error)}`,

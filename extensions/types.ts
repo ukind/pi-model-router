@@ -24,6 +24,23 @@ export interface ModelDefinition {
 export interface ClassifierConfig {
   model: string;
   thinking?: ThinkingLevel;
+  fallbacks?: string[];
+}
+
+export type ConfidenceLevel = 'high' | 'medium' | 'low';
+export type ClassifierFailureReason =
+  | 'success'
+  | 'model-not-found'
+  | 'auth-failure'
+  | 'stream-error'
+  | 'unparseable';
+
+export interface ClassifierResult {
+  tier: RouterTier;
+  confidence: ConfidenceLevel;
+  reasoning: string;
+  rawText: string;
+  failureReason: ClassifierFailureReason;
 }
 
 export interface RoutedTierConfig {
@@ -69,6 +86,11 @@ export interface RoutingDecision {
   isFallback?: boolean;
   isBudgetForced?: boolean;
   isRuleMatched?: boolean;
+  confidence?: ConfidenceLevel;
+  rawText?: string;
+  failureReason?: ClassifierFailureReason;
+  isVetoed?: boolean;
+  vetoReason?: 'explicit-hint';
 }
 
 export interface RouterPersistedState {

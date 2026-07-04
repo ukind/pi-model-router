@@ -11,11 +11,12 @@ import {
   resolveAvailableTier,
   buildRoutingDecision,
   decideRouting,
+  parseClassifierOutput,
   runClassifier,
 } from './routing';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
 import type { Context, Message, UserMessage } from '@earendil-works/pi-ai';
-import type { RouterProfile, RoutingRule } from './types';
+import type { RouterProfile, RoutingRule, ClassifierResult } from './types';
 
 vi.mock('@earendil-works/pi-ai/compat', () => ({
   streamSimple: vi.fn(),
@@ -163,10 +164,6 @@ describe('routing.ts', () => {
   });
 
   describe('resolveAvailableTier', () => {
-    const profile: RouterProfile = {
-      medium: { model: 'openai/gpt-4o' },
-    };
-
     it('should return preferred if available', () => {
       expect(
         resolveAvailableTier(
@@ -403,7 +400,8 @@ describe('routing.ts', () => {
         messages: [
           {
             role: 'user',
-            content: 'what about this particular scenario that we discussed earlier today',
+            content:
+              'what about this particular scenario that we discussed earlier today',
             timestamp: Date.now(),
           },
         ],
@@ -415,7 +413,15 @@ describe('routing.ts', () => {
         'planning',
         'Previous planning',
       );
-      const decision = decideRouting(context, 'p', profile, previous, undefined, undefined, 0.5);
+      const decision = decideRouting(
+        context,
+        'p',
+        profile,
+        previous,
+        undefined,
+        undefined,
+        0.5,
+      );
       expect(decision.tier).toBe('high');
       expect(decision.phase).toBe('planning');
       expect(decision.reasoning).toContain('planning-phase bias');
@@ -499,7 +505,8 @@ describe('routing.ts', () => {
         messages: [
           {
             role: 'user',
-            content: 'i wonder about some random topic that doesnt match any particular keyword category here today now',
+            content:
+              'i wonder about some random topic that doesnt match any particular keyword category here today now',
             timestamp: Date.now(),
           },
         ],
@@ -508,36 +515,343 @@ describe('routing.ts', () => {
       expect(decision.tier).toBe('medium');
       expect(decision.reasoning).toContain('Defaulted to medium');
     });
+
+    // --- Phase 3: veto gate + phase decoupling ---
+    const classifierHigh = (): ClassifierResult => ({
+      tier: 'high',
+      confidence: 'high',
+      reasoning: 'Architectural.',
+      rawText: 'Tier: high',
+      failureReason: 'success',
+    });
+    const classifierLow = (): ClassifierResult => ({
+      tier: 'low',
+      confidence: 'high',
+      reasoning: 'Simple.',
+      rawText: 'Tier: low',
+      failureReason: 'success',
+    });
+    const classifierMedium = (): ClassifierResult => ({
+      tier: 'medium',
+      confidence: 'medium',
+      reasoning: 'Normal coding.',
+      rawText: 'Tier: medium',
+      failureReason: 'success',
+    });
+
+    it('veto: ultrathink + classifier low → high, isVetoed true', () => {
+      const context: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: 'ultrathink this through',
+            timestamp: Date.now(),
+          },
+        ],
+      };
+      const decision = decideRouting(
+        context,
+        'p',
+        profile,
+        undefined,
+        undefined,
+        undefined,
+        0.5,
+        undefined,
+        false,
+        classifierLow(),
+      );
+      expect(decision.tier).toBe('high');
+      expect(decision.isVetoed).toBe(true);
+      expect(decision.vetoReason).toBe('explicit-hint');
+      expect(decision.reasoning).toContain('vetoed');
+    });
+
+    it('veto: fast + classifier high → low, isVetoed true', () => {
+      const context: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: 'fast answer please',
+            timestamp: Date.now(),
+          },
+        ],
+      };
+      const decision = decideRouting(
+        context,
+        'p',
+        profile,
+        undefined,
+        undefined,
+        undefined,
+        0.5,
+        undefined,
+        false,
+        classifierHigh(),
+      );
+      expect(decision.tier).toBe('low');
+      expect(decision.isVetoed).toBe(true);
+      expect(decision.vetoReason).toBe('explicit-hint');
+    });
+
+    it('no veto when classifier agrees with hint (high hint + classifier high)', () => {
+      const context: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: 'ultrathink the architecture',
+            timestamp: Date.now(),
+          },
+        ],
+      };
+      const decision = decideRouting(
+        context,
+        'p',
+        profile,
+        undefined,
+        undefined,
+        undefined,
+        0.5,
+        undefined,
+        false,
+        classifierHigh(),
+      );
+      expect(decision.tier).toBe('high');
+      expect(decision.isVetoed).toBeUndefined();
+    });
+
+    it('no veto when no explicit hint present', () => {
+      const context: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: 'implement the feature',
+            timestamp: Date.now(),
+          },
+        ],
+      };
+      const decision = decideRouting(
+        context,
+        'p',
+        profile,
+        undefined,
+        undefined,
+        undefined,
+        0.5,
+        undefined,
+        false,
+        classifierMedium(),
+      );
+      expect(decision.tier).toBe('medium');
+      expect(decision.isVetoed).toBeUndefined();
+    });
+
+    it('phase: classifier medium during planning → phase stays planning', () => {
+      const context: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: 'implement the feature now',
+            timestamp: Date.now(),
+          },
+        ],
+      };
+      const previous = buildRoutingDecision(
+        'p',
+        profile,
+        'high',
+        'planning',
+        'Previous planning',
+      );
+      const decision = decideRouting(
+        context,
+        'p',
+        profile,
+        previous,
+        undefined,
+        undefined,
+        0.5,
+        undefined,
+        false,
+        classifierMedium(),
+      );
+      expect(decision.tier).toBe('medium');
+      expect(decision.phase).toBe('planning');
+    });
+
+    it('phase: falls back to phaseForTier when no previous decision', () => {
+      const context: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: 'implement the feature now',
+            timestamp: Date.now(),
+          },
+        ],
+      };
+      const decision = decideRouting(
+        context,
+        'p',
+        profile,
+        undefined,
+        undefined,
+        undefined,
+        0.5,
+        undefined,
+        false,
+        classifierMedium(),
+      );
+      expect(decision.tier).toBe('medium');
+      expect(decision.phase).toBe('implementation');
+    });
+
+    it('threads classifier provenance onto decision', () => {
+      const context: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: 'implement the feature now',
+            timestamp: Date.now(),
+          },
+        ],
+      };
+      const decision = decideRouting(
+        context,
+        'p',
+        profile,
+        undefined,
+        undefined,
+        undefined,
+        0.5,
+        undefined,
+        false,
+        classifierMedium(),
+      );
+      expect(decision.confidence).toBe('medium');
+      expect(decision.rawText).toBe('Tier: medium');
+      expect(decision.failureReason).toBe('success');
+      expect(decision.isClassifier).toBe(true);
+    });
+  });
+
+  describe('parseClassifierOutput', () => {
+    it('parses clean 3-line format', () => {
+      const result = parseClassifierOutput(
+        'Tier: high\nConfidence: high\nReasoning: Needs deep reasoner.',
+      );
+      expect(result.tier).toBe('high');
+      expect(result.confidence).toBe('high');
+      expect(result.reasoning).toBe('Needs deep reasoner.');
+      expect(result.failureReason).toBe('success');
+    });
+
+    it('parses 2-line format (missing confidence) — defaults medium', () => {
+      const result = parseClassifierOutput(
+        'Tier: high\nReasoning: Complex task.',
+      );
+      expect(result.tier).toBe('high');
+      expect(result.confidence).toBe('medium');
+      expect(result.failureReason).toBe('success');
+    });
+
+    it('strips markdown bold (**Tier:**)', () => {
+      const result = parseClassifierOutput(
+        '**Tier:** high\n**Confidence:** high\n**Reasoning:** Deep.',
+      );
+      expect(result.tier).toBe('high');
+      expect(result.confidence).toBe('high');
+    });
+
+    it('strips trailing punctuation (high.)', () => {
+      const result = parseClassifierOutput('Tier: high.\nReasoning: Hard.');
+      expect(result.tier).toBe('high');
+    });
+
+    it('handles multi-word tier (high priority → high)', () => {
+      const result = parseClassifierOutput(
+        'Tier: high priority\nReasoning: Architectural.',
+      );
+      expect(result.tier).toBe('high');
+    });
+
+    it('handles empty tier value (Tier:)', () => {
+      const result = parseClassifierOutput('Tier: \nReasoning: none.');
+      expect(result.failureReason).toBe('unparseable');
+      expect(result.tier).toBeUndefined();
+    });
+
+    it('handles \\r\\n line endings', () => {
+      const result = parseClassifierOutput(
+        'Tier: high\r\nConfidence: low\r\nReasoning: Simple.',
+      );
+      expect(result.tier).toBe('high');
+      expect(result.confidence).toBe('low');
+    });
+
+    it('handles partial final chunk (Tier: hi)', () => {
+      const result = parseClassifierOutput('Tier: hi');
+      expect(result.failureReason).toBe('unparseable');
+    });
+
+    it("preserves colons in reasoning (It's: complicated)", () => {
+      const result = parseClassifierOutput(
+        "Tier: medium\nReasoning: It's: complicated.",
+      );
+      expect(result.tier).toBe('medium');
+      expect(result.reasoning).toBe("It's: complicated.");
+    });
+
+    it('returns unparseable for no tier line', () => {
+      const result = parseClassifierOutput('Invalid response format');
+      expect(result.failureReason).toBe('unparseable');
+    });
+
+    it('defaults confidence to medium on invalid value', () => {
+      const result = parseClassifierOutput(
+        'Tier: low\nConfidence: extreme\nReasoning: Fast.',
+      );
+      expect(result.confidence).toBe('medium');
+      expect(result.tier).toBe('low');
+    });
   });
 
   describe('runClassifier', () => {
     const mockRegistry = {
       find: (provider: string, modelId: string) => {
-        if (provider === 'openai' && modelId === 'gpt-4o') {
+        if (
+          provider === 'openai' &&
+          (modelId === 'gpt-4o' || modelId === 'no-key-model')
+        ) {
           return { provider, id: modelId, reasoning: true } as any;
+        }
+        if (provider === 'google' && modelId === 'gemini-flash') {
+          return { provider, id: modelId, reasoning: false } as any;
         }
         return undefined;
       },
-      getApiKeyAndHeaders: async () => ({
-        ok: true as const,
-        apiKey: 'test-key',
-        headers: {},
-      }),
+      getApiKeyAndHeaders: async (model: any) => {
+        if (model.id === 'no-key-model') {
+          return { ok: false, error: 'missing key' } as any;
+        }
+        return { ok: true as const, apiKey: 'test-key', headers: {} };
+      },
     } as any;
 
     const context: Context = {
       messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
     };
 
-    it('should return parsed classification result from stream delta', async () => {
+    it('returns structured ClassifierResult from 3-line stream', async () => {
       const mockStream = (async function* () {
-        yield { type: 'text_delta', delta: 'Tier: high\n' };
-        yield { type: 'text_delta', delta: 'Reasoning: Needs deep reasoner.' };
+        yield {
+          type: 'text_delta',
+          delta: 'Tier: high\nConfidence: high\nReasoning: Deep.',
+        };
       })();
       vi.mocked(streamSimple).mockReturnValue(mockStream as any);
 
       const result = await runClassifier(
-        'openai/gpt-4o',
+        ['openai/gpt-4o'],
         mockRegistry,
         context,
         'planning',
@@ -545,22 +859,105 @@ describe('routing.ts', () => {
       );
       expect(result).toEqual({
         tier: 'high',
-        reasoning: 'Needs deep reasoner.',
+        confidence: 'high',
+        reasoning: 'Deep.',
+        rawText: 'Tier: high\nConfidence: high\nReasoning: Deep.',
+        failureReason: 'success',
       });
     });
 
-    it('should return undefined if stream fails or format is invalid', async () => {
-      const mockStream = (async function* () {
-        yield { type: 'text_delta', delta: 'Invalid response format' };
-      })();
-      vi.mocked(streamSimple).mockReturnValue(mockStream as any);
-
+    it('returns undefined when all refs fail (model-not-found)', async () => {
       const result = await runClassifier(
-        'openai/gpt-4o',
+        ['openai/nonexistent'],
         mockRegistry,
         context,
       );
       expect(result).toBeUndefined();
+    });
+
+    it('returns undefined when auth fails on all refs', async () => {
+      const result = await runClassifier(
+        ['openai/no-key-model'],
+        mockRegistry,
+        context,
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it('returns undefined when stream yields unparseable output on all refs', async () => {
+      const mockStream = (async function* () {
+        yield { type: 'text_delta', delta: 'Garbage response' };
+      })();
+      vi.mocked(streamSimple).mockReturnValue(mockStream as any);
+      const result = await runClassifier(
+        ['openai/gpt-4o'],
+        mockRegistry,
+        context,
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it('retries next ref on infrastructure failure (first missing, second succeeds)', async () => {
+      const mockStream = (async function* () {
+        yield {
+          type: 'text_delta',
+          delta: 'Tier: low\nConfidence: high\nReasoning: Simple.',
+        };
+      })();
+      vi.mocked(streamSimple).mockReturnValue(mockStream as any);
+      const result = await runClassifier(
+        ['openai/nonexistent', 'openai/gpt-4o'],
+        mockRegistry,
+        context,
+      );
+      expect(result?.tier).toBe('low');
+      expect(result?.failureReason).toBe('success');
+    });
+
+    it('retries next ref on pre-content stream error', async () => {
+      let callCount = 0;
+      vi.mocked(streamSimple).mockImplementation((() => {
+        callCount++;
+        if (callCount === 1) {
+          return (async function* () {
+            yield { type: 'error', error: { errorMessage: 'rate limited' } };
+          })();
+        }
+        return (async function* () {
+          yield {
+            type: 'text_delta',
+            delta: 'Tier: medium\nConfidence: medium\nReasoning: Normal.',
+          };
+        })();
+      }) as any);
+      const result = await runClassifier(
+        ['openai/gpt-4o', 'google/gemini-flash'],
+        mockRegistry,
+        context,
+      );
+      expect(result?.tier).toBe('medium');
+      expect(callCount).toBe(2);
+    });
+
+    it('does NOT retry after content received (mid-stream error — partial text parsed)', async () => {
+      let callCount = 0;
+      vi.mocked(streamSimple).mockImplementation((() => {
+        callCount++;
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'Tier: high' };
+          yield {
+            type: 'error',
+            error: { errorMessage: 'mid-stream failure' },
+          };
+        })();
+      }) as any);
+      const result = await runClassifier(
+        ['openai/gpt-4o'],
+        mockRegistry,
+        context,
+      );
+      expect(result?.tier).toBe('high');
+      expect(callCount).toBe(1);
     });
   });
 });
