@@ -35,6 +35,10 @@ vi.mock('./config', () => ({
     'xhigh',
   ] as const,
   isRouterTier: (v: unknown) => v === 'high' || v === 'medium' || v === 'low',
+  isThinkingLevel: (v: unknown) =>
+    typeof v === 'string' &&
+    ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(v),
+  isObjectRecord: (v: unknown) => typeof v === 'object' && v !== null,
 }));
 
 describe('index.ts (orchestrator)', () => {
@@ -550,7 +554,10 @@ describe('index.ts (orchestrator)', () => {
       // Select router model to ensure routerEnabled=true
       const modelSelectHandlers = eventListeners['model_select'] || [];
       for (const handler of modelSelectHandlers) {
-        await handler({ model: { provider: 'router', id: 'balanced' } }, mockCtx);
+        await handler(
+          { model: { provider: 'router', id: 'balanced' } },
+          mockCtx,
+        );
       }
 
       // Clear mocks after initialization and model_select

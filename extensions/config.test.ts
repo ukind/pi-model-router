@@ -551,12 +551,14 @@ describe('config.ts', () => {
       ]);
     });
 
-    it('returns [] for level "off" regardless of registry', () => {
+    it('returns unsupported tiers for level "off" when registry present (off short-circuit removed)', () => {
       const profile: RouterProfile = {
         high: { model: 'openai/gpt-4o' },
       };
       const registry = buildRegistry({ 'openai/gpt-4o': false });
-      expect(getUnsupportedTiers(profile, 'off', registry as any)).toEqual([]);
+      expect(getUnsupportedTiers(profile, 'off', registry as any)).toEqual([
+        'high',
+      ]);
     });
 
     it('returns [] when registry is undefined', () => {

@@ -29,6 +29,104 @@ describe('state.ts', () => {
       };
       expect(isRouterPersistedState(state)).toBe(true);
     });
+
+    it('should reject invalid pinByProfile values', () => {
+      expect(
+        isRouterPersistedState({
+          enabled: true,
+          selectedProfile: 'x',
+          timestamp: 1,
+          pinByProfile: { p: 'ultra' },
+        }),
+      ).toBe(false);
+    });
+
+    it('should reject NaN accumulatedCost', () => {
+      expect(
+        isRouterPersistedState({
+          enabled: true,
+          selectedProfile: 'x',
+          timestamp: 1,
+          accumulatedCost: NaN,
+        }),
+      ).toBe(false);
+    });
+
+    it('should reject Infinity accumulatedCost', () => {
+      expect(
+        isRouterPersistedState({
+          enabled: true,
+          selectedProfile: 'x',
+          timestamp: 1,
+          accumulatedCost: Infinity,
+        }),
+      ).toBe(false);
+    });
+
+    it('should accept state without accumulatedCost (undefined is valid)', () => {
+      expect(
+        isRouterPersistedState({
+          enabled: true,
+          selectedProfile: 'x',
+          timestamp: 1,
+        }),
+      ).toBe(true);
+    });
+
+    it('should accept valid state with all optional fields', () => {
+      expect(
+        isRouterPersistedState({
+          enabled: true,
+          selectedProfile: 'x',
+          timestamp: 1,
+          pinByProfile: { p: 'high' },
+          thinkingByProfile: { p: { high: 'xhigh' } },
+          pinTier: 'high',
+          debugEnabled: true,
+          widgetEnabled: false,
+          lastNonRouterModel: 'openai/gpt-4o',
+          accumulatedCost: 0.5,
+          lastDecision: {
+            profile: 'x',
+            tier: 'high',
+            timestamp: 1,
+          },
+        }),
+      ).toBe(true);
+    });
+
+    it('should reject invalid thinkingByProfile inner level', () => {
+      expect(
+        isRouterPersistedState({
+          enabled: true,
+          selectedProfile: 'x',
+          timestamp: 1,
+          thinkingByProfile: { p: { high: 'super-high' } },
+        }),
+      ).toBe(false);
+    });
+
+    it('should reject invalid pinTier', () => {
+      expect(
+        isRouterPersistedState({
+          enabled: true,
+          selectedProfile: 'x',
+          timestamp: 1,
+          pinTier: 'ultra',
+        }),
+      ).toBe(false);
+    });
+
+    it('should reject invalid lastDecision shape', () => {
+      expect(
+        isRouterPersistedState({
+          enabled: true,
+          selectedProfile: 'x',
+          timestamp: 1,
+          lastDecision: { profile: 'x' },
+        }),
+      ).toBe(false);
+    });
   });
 
   describe('buildPersistedState', () => {

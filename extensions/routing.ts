@@ -76,10 +76,43 @@ export const containsAny = (text: string, keywords: string[]): boolean => {
   return keywords.some((keyword) => text.includes(keyword));
 };
 
+// ponytail: module-level cache avoids recompiling regex per call
+const wordBoundaryRegexCache = new Map<string, RegExp>();
+
+const wordBoundaryRegex = (keyword: string): RegExp => {
+  let r = wordBoundaryRegexCache.get(keyword);
+  if (!r) {
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    r = new RegExp(`\\b${escaped}\\b`, 'i');
+    wordBoundaryRegexCache.set(keyword, r);
+  }
+  return r;
+};
+
+export const containsAnyWord = (text: string, keywords: string[]): boolean =>
+  keywords.some((keyword) => wordBoundaryRegex(keyword).test(text));
+
 export const phaseForTier = (tier: RouterTier): RouterPhase => {
   if (tier === 'high') return 'planning';
   if (tier === 'medium') return 'implementation';
   return 'lightweight';
+};
+
+/**
+ * Build the delegation fallback tier chain for runtime model delegation.
+ * Non-budget: preferred → down → nearest-up (down-then-nearest-up).
+ * Budget: preferred → down only (respect the cap, no upward escape).
+ */
+export const buildDelegationTierChain = (
+  startTier: RouterTier,
+  isBudgetExceeded: boolean,
+): RouterTier[] => {
+  const downOrder: RouterTier[] = ['high', 'medium', 'low'];
+  const startIdx = downOrder.indexOf(startTier);
+  const downChain = downOrder.slice(startIdx);
+  if (isBudgetExceeded) return downChain;
+  const upChain = downOrder.slice(0, startIdx).reverse();
+  return [...downChain, ...upChain];
 };
 
 export const resolveAvailableTier = (
@@ -156,7 +189,7 @@ export const matchHighestTierRule = (
   for (const rule of rules) {
     const matches = Array.isArray(rule.matches) ? rule.matches : [rule.matches];
     const lowercaseMatches = matches.map((m) => m.toLowerCase());
-    if (containsAny(prompt, lowercaseMatches)) {
+    if (containsAnyWord(prompt, lowercaseMatches)) {
       if (!best || tierRank[rule.tier] > tierRank[best.tier]) {
         best = {
           tier: rule.tier,
@@ -278,12 +311,14 @@ export const decideRouting = (
   let isRuleMatched = false;
   let isClassifier = false;
   let isVetoed = false;
+  let isPinned = false;
   let vetoReason: 'explicit-hint' | undefined;
 
   if (pinnedTier) {
     phase = phaseForTier(pinnedTier);
     tier = pinnedTier;
     reasoning = `Pinned to ${pinnedTier} tier via /router-pin.`;
+    isPinned = true;
   } else {
     const ruleMatch = ruleHit ?? matchHighestTierRule(prompt, rules);
     if (ruleMatch) {
@@ -398,6 +433,11 @@ export const decideRouting = (
     phase = 'implementation';
     reasoning = `Budget exceeded. Downgraded from high to medium tier. (Original: ${reasoning})`;
     isBudgetForced = true;
+  } else if (isBudgetExceeded && tier === 'medium') {
+    tier = 'low';
+    phase = 'lightweight';
+    reasoning = `Budget exceeded. Downgraded from medium to low tier. (Original: ${reasoning})`;
+    isBudgetForced = true;
   }
 
   // [Slice 1] passes isBudgetExceeded for preferDown
@@ -418,6 +458,7 @@ export const decideRouting = (
     isClassifier,
   );
   decision.isRuleMatched = isRuleMatched;
+  decision.isPinned = isPinned;
   decision.isBudgetForced = isBudgetForced;
   // Thread classifier provenance when classifier was the source
   if (isClassifier && classifierResult) {
@@ -500,6 +541,7 @@ export const runClassifier = async (
   context: Context,
   currentPhase?: RouterPhase,
   thinking?: ThinkingLevel,
+  hasImage?: boolean,
 ): Promise<ClassifierResult | undefined> => {
   for (const ref of refs) {
     try {
@@ -528,6 +570,7 @@ ${historyText}
 
 Latest user message:
 ${promptText}
+${hasImage ? '\nNote: The user has attached an image. Bias toward "high" or "medium" tier as lower tiers may not support vision capabilities.' : ''}
 
 Return your decision in exactly three lines:
 Tier: [high|medium|low]

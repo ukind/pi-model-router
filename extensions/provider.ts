@@ -34,6 +34,7 @@ import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 import {
   phaseForTier,
   buildRoutingDecision,
+  buildDelegationTierChain,
   decideRouting,
   runClassifier,
   matchHighestTierRule,
@@ -94,7 +95,15 @@ const truncateContext = (context: Context, limit: number): Context => {
   const latestMessage = messages.pop();
   if (!latestMessage) return context;
 
-  // Remove oldest until it fits
+  // Collect toolCallIds from a message's content (assistant toolCall parts).
+  const extractToolCallIds = (msg: Message): string[] => {
+    if (!Array.isArray(msg.content)) return [];
+    return msg.content
+      .filter((p) => p.type === 'toolCall' && 'id' in p && p.id)
+      .map((p) => (p as { id: string }).id);
+  };
+
+  // Remove oldest until it fits, preserving toolCall/toolResult pairs.
   while (messages.length > 0) {
     const currentTokens =
       getSystemTokens() +
@@ -105,12 +114,27 @@ const truncateContext = (context: Context, limit: number): Context => {
       );
 
     if (currentTokens <= limit) break;
-    messages.shift(); // Remove oldest
+
+    const evicted = messages.shift();
+    if (evicted) {
+      const toolCallIds = new Set(extractToolCallIds(evicted));
+      if (toolCallIds.size > 0) {
+        // Remove linked toolResult messages so pairs stay together.
+        for (let j = messages.length - 1; j >= 0; j--) {
+          const msg = messages[j];
+          if (
+            msg.role === 'toolResult' &&
+            'toolCallId' in msg &&
+            toolCallIds.has((msg as { toolCallId: string }).toolCallId)
+          ) {
+            messages.splice(j, 1);
+          }
+        }
+      }
+    }
   }
 
-  const finalMessages: Message[] = [];
-  finalMessages.push(...messages);
-  finalMessages.push(latestMessage);
+  const finalMessages: Message[] = [...messages, latestMessage];
 
   return { ...context, messages: finalMessages };
 };
@@ -196,12 +220,41 @@ export const registerRouterProvider = (
         ? { xhigh: 'xhigh' }
         : undefined;
 
+    // Honest image advertisement: union of tier model capabilities.
+    const profileSupportsImages = (
+      p: RouterConfig['profiles'][string],
+      registry: ExtensionContext['modelRegistry'] | undefined,
+    ): boolean => {
+      // ponytail: no registry = advertise images (existing behavior, avoids
+      // breaking registration before session_start).
+      if (!registry) return true;
+      for (const tier of ROUTER_TIERS) {
+        if (!p[tier]) continue;
+        const candidates = [p[tier]!.model, ...(p[tier]!.fallbacks ?? [])];
+        for (const ref of candidates) {
+          try {
+            const { provider: pp, modelId: mm } = parseCanonicalModelRef(ref);
+            if (registry.find(pp, mm)?.input?.includes('image')) return true;
+          } catch {
+            /* skip invalid */
+          }
+        }
+      }
+      return false;
+    };
+    const supportsImages = profileSupportsImages(
+      profile,
+      state.currentModelRegistry,
+    );
+
     return {
       id: name,
       name: `Router ${name}`,
       reasoning: hasReasoning,
       ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
-      input: ['text', 'image'] as ('text' | 'image')[],
+      input: supportsImages
+        ? (['text', 'image'] as ('text' | 'image')[])
+        : (['text'] as ('text' | 'image')[]),
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: maxContextWindow,
       maxTokens: maxMaxTokens,
@@ -209,7 +262,10 @@ export const registerRouterProvider = (
   });
 
   const modelsKey = modelDefinitions
-    .map((m) => `${m.id}:${m.contextWindow}:${m.maxTokens}:${m.reasoning}`)
+    .map(
+      (m) =>
+        `${m.id}:${m.contextWindow}:${m.maxTokens}:${m.reasoning}:${m.input.join('|')}`,
+    )
     .join(',');
   if (state.lastRegisteredModels === modelsKey) return;
 
@@ -263,6 +319,7 @@ export const registerRouterProvider = (
               context,
               state.lastDecision?.phase,
               state.currentConfig.classifierModel.thinking,
+              hasImageAttachment(context), // pass image-present flag
             );
           }
 
@@ -284,6 +341,7 @@ export const registerRouterProvider = (
           const lastMessage = context.messages[context.messages.length - 1];
           const previousDecision = state.lastDecision;
           const isGoogleThinkingToolContinuation =
+            !pinnedTier && // skip guard when user pinned a tier
             lastMessage?.role === 'toolResult' &&
             previousDecision?.profile === model.id &&
             previousDecision.targetProvider === 'google' &&
@@ -346,7 +404,7 @@ export const registerRouterProvider = (
               }
 
               if (foundTier) {
-                decision = buildRoutingDecision(
+                const promotedDecision = buildRoutingDecision(
                   model.id,
                   profile,
                   foundTier,
@@ -355,6 +413,21 @@ export const registerRouterProvider = (
                   state.thinkingByProfile[model.id],
                   false,
                 );
+                // Carry forward provenance (modeled after routing.ts).
+                promotedDecision.isPinned = decision.isPinned;
+                promotedDecision.isRuleMatched = decision.isRuleMatched;
+                promotedDecision.isBudgetForced = decision.isBudgetForced;
+                if (decision.isClassifier) {
+                  promotedDecision.isClassifier = decision.isClassifier;
+                  promotedDecision.confidence = decision.confidence;
+                  promotedDecision.rawText = decision.rawText;
+                  promotedDecision.failureReason = decision.failureReason;
+                  if (decision.isVetoed) {
+                    promotedDecision.isVetoed = decision.isVetoed;
+                    promotedDecision.vetoReason = decision.vetoReason;
+                  }
+                }
+                decision = promotedDecision;
               }
             }
           }
@@ -373,9 +446,10 @@ export const registerRouterProvider = (
           }
 
           // Cross-tier fallback loop
-          const tierOrder: RouterTier[] = ['high', 'medium', 'low'];
-          const tierStart = tierOrder.indexOf(decision.tier);
-          const tierChain = tierOrder.slice(tierStart);
+          const tierChain = buildDelegationTierChain(
+            decision.tier,
+            isBudgetExceeded,
+          );
           const originalTier = decision.tier;
 
           let lastError: unknown;
@@ -513,6 +587,15 @@ export const registerRouterProvider = (
                       event.error?.errorMessage ||
                         'Model failed before sending content.',
                     );
+                  }
+                  // ponytail: partial-stream cost — record usage if the error
+                  // event carries it. If no usage available, cost is not
+                  // recorded (accepted leak).
+                  if (event.type === 'error' && contentReceived) {
+                    const partialUsage = event.error?.usage;
+                    if (partialUsage?.cost?.total) {
+                      state.accumulatedCost += partialUsage.cost.total;
+                    }
                   }
                   const isContent =
                     event.type === 'text_delta' ||

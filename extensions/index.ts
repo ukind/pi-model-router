@@ -95,10 +95,10 @@ const routerExtension = (pi: ExtensionAPI) => {
       if (decision.isBudgetForced) source = 'budget';
       else if (decision.isClassifier) source = 'classifier';
       else if (decision.isRuleMatched) source = 'rule';
-      // ponytail: depends on the 'Pinned to ...' template literal in routing.ts decideRouting pin branch.
-      // 'includes' (not 'startsWith') so the resolveAvailableTier rewrite path
-      // ("Resolved from … Original: Pinned to …") also detects pin.
-      else if (decision.reasoning.includes('Pinned to')) source = 'pin';
+      // NEW — structured isPinned flag (Decision 10), replaces fragile reasoning.includes sniff.
+      // Check isFallback first so pinned-then-fallbacked decisions classify as 'fallback' not 'pin'.
+      else if (decision.isFallback) source = 'fallback';
+      else if (decision.isPinned) source = 'pin';
       else source = 'heuristic';
       // Phase 5: append confidence + failureReason when classifier-driven (observability)
       const provenance =

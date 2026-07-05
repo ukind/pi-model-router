@@ -676,17 +676,20 @@ const tierSupportsReasoning = (
  * model in [primary, ...fallbacks] advertises `.reasoning`. Registry-miss
  * counts as unsupported (runtime treats a missing model as a falsy gate).
  *
- * `level === 'off'` or an unavailable registry short-circuit to "all
- * supported" — 'off' sends no reasoning anywhere; without a registry the
- * predicate cannot be evaluated and a warning would be noise. The registry
- * param is optional so 2-arg callers compile while warning sites are migrated.
+ * An unavailable registry short-circuits to "all supported" — without a
+ * registry the predicate cannot be evaluated and a warning would be noise.
+ * The registry param is optional so 2-arg callers compile while warning
+ * sites are migrated. The `level === 'off'` short-circuit was removed
+ * (Decision 9) so callers warn even for 'off' when tiers lack reasoning.
  */
 export const getUnsupportedTiers = (
   profile: RouterProfile,
   level: ThinkingLevel,
   modelRegistry?: ExtensionContext['modelRegistry'],
 ): string[] => {
-  if (level === 'off' || !modelRegistry) return [];
+  // ponytail: !modelRegistry short-circuit kept — cannot evaluate capabilities without registry.
+  // 'off' short-circuit removed (Decision 9) — warn even for 'off' if tiers lack reasoning.
+  if (!modelRegistry) return [];
   const unsupported: string[] = [];
   for (const tier of ROUTER_TIERS) {
     const tierConfig = profile[tier];

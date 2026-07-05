@@ -86,6 +86,7 @@ export interface RoutingDecision {
   isFallback?: boolean;
   isBudgetForced?: boolean;
   isRuleMatched?: boolean;
+  isPinned?: boolean;
   confidence?: ConfidenceLevel;
   rawText?: string;
   failureReason?: ClassifierFailureReason;
