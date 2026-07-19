@@ -11,7 +11,7 @@ Intelligent per-turn model router extension for the [pi-coding-agent](https://gi
   - **LLM Intent Classifier**: Optional LLM-based classifier runs before heuristics when no pin or rule matches, categorizing intent for more accurate tier selection.
   - **Custom Rules**: Define keyword-based tier overrides for specific patterns (e.g., `deploy` → `high`).
   - **Cost Budgeting**: Set a session spend limit; high tier downgrades to medium once exceeded. When the downgraded tier isn't configured, a lower tier is chosen before a higher one (no silent re-promotion past the cap).
-  - **Fallback Chains**: Per-tier `fallbacks` retried first; if all in-tier models fail, the router degrades across tiers (high → medium → low) before throwing.
+  - **Fallback Chains**: Per-tier `fallbacks` retried first; if all in-tier models fail, the router degrades across tiers — down-then-nearest-up (non-budget) / down-only (budget-exceeded) — before throwing.
 - **Phase Memory**: Biased stickiness to keep you in the same tier during multi-turn planning or implementation work.
 - **Thinking Control**: Full control over reasoning/thinking levels per tier and profile. Changing pi's thinking level (e.g. via `shift+tab`) automatically applies as an all-tier override for the active router profile.
 - **Persistent State**: Pins, profiles, costs, and debug history are remembered across agent restarts and conversation branches.
@@ -117,11 +117,12 @@ This example demonstrates every supported field. All fields except `profiles` ar
 
 - **`models`**: Defines reusable aliases (`gpt-pro`, `flash`, `nano`). Aliases can be referenced anywhere a model ref is accepted — in tier `model`, tier `fallbacks`, and `classifierModel`.
 - **`classifierModel`**: Can be a plain string (`"flash"`) or an object with a `thinking` level. Here it uses the object form to set the classifier's reasoning level.
-- **`rules`**: Each rule matches a string or array of strings (substring match, case-insensitive). When multiple rules match, the highest tier wins. Rules are skipped when a tier is pinned.
+- **`rules`**: Each rule matches a string or array of strings (word-boundary match, case-insensitive; multi-word phrase hints, e.g. `step by step`, use substring match). When multiple rules match, the highest tier wins. Rules are skipped when a tier is pinned.
 - **`profiles.auto.high`**: Uses the `gpt-pro` alias and defines a same-tier `fallbacks` chain to a different provider (Anthropic).
 - **`profiles.auto.medium`**: Overrides the alias's resolved `contextWindow` and `maxTokens` at the tier level.
 - **`profiles.auto.low`**: Explicitly sets `reasoning: false` and restricts `thinkingLevels` to `low` only.
 - **Minimal config**: If you only need basic routing, a config like this is sufficient:
+
   ```json
   {
     "profiles": {
@@ -192,7 +193,7 @@ Example: if Anthropic Opus hits its limit, fall back to GPT-5.5 Pro — both at 
 The retry order is:
 
 1. **In-tier fallbacks first** — primary model, then each entry in `fallbacks` (same tier).
-2. **Cross-tier downgrade** — only if all in-tier models fail, the router drops to the next lower tier (`high` → `medium` → `low`) and repeats the process.
+2. **Cross-tier downgrade** — only if all in-tier models fail, the router drops to the next lower tier, or nearest-up if the cap is not exceeded (down-then-nearest-up). When the budget cap is exceeded, the chain is down-only.
 
 This applies to any failure that occurs **before or during** streaming, including missing API keys, model-not-found, and mid-stream errors (if no content was received yet).
 
@@ -233,13 +234,17 @@ Google models with thinking/reasoning enabled require the **same model** to be u
 
 The router reports the **maximum** context window and output token limit across all tiers to pi (so pi doesn't prematurely truncate). However, when the router delegates to a smaller-tier model, it **automatically truncates the conversation** to fit that model's context window. Truncation removes the oldest messages first while always preserving the system prompt and the latest user message.
 
+### Budget Gate Is Pre-Stream
+
+The session budget cap is checked **before** a turn starts streaming — a single in-flight turn can still exceed `maxSessionBudget`; the downgrade applies from the next turn onward.
+
 ### Turn-End Auto-Restore
 
 If the router is enabled but a non-router model somehow got selected mid-conversation, the extension **automatically switches back** to the active router profile at the end of every turn.
 
 ### `reasoning` Defaults to `true`
 
-When a model definition or tier config **omits** the `reasoning` field, the router **assumes the model supports reasoning**. Only an explicit `"reasoning": false` disables reasoning and restricts the available thinking levels.
+When a model definition or tier config **omits** the `reasoning` field, the router **assumes the model supports reasoning**. An explicit `"reasoning": false` is advisory; the runtime delegation gate consults the live model registry, not the config field. `thinkingLevels` similarly narrows what the TUI exposes, not what routing can pick.
 
 ### Configuration Warnings
 
