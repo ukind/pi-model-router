@@ -23,7 +23,8 @@ vi.mock('./config', () => ({
   resolveContextWindow: () => 100000,
   resolveMaxTokens: () => 4000,
   collectProfileThinkingLevels: () => new Set<string>(),
-  getUnsupportedTiers: () => [] as string[],
+  getUnsupportedTiers: (_profile?: unknown, _registry?: unknown) =>
+    [] as string[],
   ROUTER_TIERS: ['high', 'medium', 'low'] as const,
   ROUTER_PIN_VALUES: ['auto', 'high', 'medium', 'low'] as const,
   THINKING_LEVELS: [
@@ -35,6 +36,8 @@ vi.mock('./config', () => ({
     'xhigh',
   ] as const,
   isRouterTier: (v: unknown) => v === 'high' || v === 'medium' || v === 'low',
+  isRouterPhase: (v: unknown) =>
+    v === 'planning' || v === 'implementation' || v === 'lightweight',
   isThinkingLevel: (v: unknown) =>
     typeof v === 'string' &&
     ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(v),

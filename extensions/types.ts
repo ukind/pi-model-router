@@ -28,12 +28,7 @@ export interface ClassifierConfig {
 }
 
 export type ConfidenceLevel = 'high' | 'medium' | 'low';
-export type ClassifierFailureReason =
-  | 'success'
-  | 'model-not-found'
-  | 'auth-failure'
-  | 'stream-error'
-  | 'unparseable';
+export type ClassifierFailureReason = 'success' | 'unparseable';
 
 export interface ClassifierResult {
   tier: RouterTier;
@@ -103,7 +98,6 @@ export interface RouterPersistedState {
   debugEnabled?: boolean;
   widgetEnabled?: boolean;
   debugHistory?: RoutingDecision[];
-  lastPhase?: RouterPhase;
   lastDecision?: RoutingDecision;
   lastNonRouterModel?: string;
   accumulatedCost?: number;

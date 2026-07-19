@@ -120,6 +120,10 @@ describe('ui.ts', () => {
       expect(getDecisionFlags(mk())).toEqual([]);
     });
 
+    it('returns vetoed flag when isVetoed is true', () => {
+      expect(getDecisionFlags(mk({ isVetoed: true }))).toEqual(['vetoed']);
+    });
+
     it('returns all flags when all are true', () => {
       expect(
         getDecisionFlags(
@@ -128,9 +132,22 @@ describe('ui.ts', () => {
             isBudgetForced: true,
             isRuleMatched: true,
             isClassifier: true,
+            isVetoed: true,
+            isPinned: true,
           }),
         ),
-      ).toEqual(['fallback', 'budget-limit', 'rule', 'classifier']);
+      ).toEqual([
+        'fallback',
+        'budget-limit',
+        'rule',
+        'classifier',
+        'vetoed',
+        'pin',
+      ]);
+    });
+
+    it('returns pin flag when isPinned is true', () => {
+      expect(getDecisionFlags(mk({ isPinned: true }))).toEqual(['pin']);
     });
   });
 

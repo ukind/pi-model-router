@@ -87,6 +87,7 @@ describe('commands.ts', () => {
     ensureValidActiveRouterProfile: vi.fn(),
     switchToRouterProfile: vi.fn().mockResolvedValue(true),
     syncPiThinkingLevel: vi.fn(),
+    clearDebugHistory: vi.fn(),
   });
 
   describe('Registration & Subcommand Completion', () => {
@@ -286,7 +287,7 @@ describe('commands.ts', () => {
       );
 
       await cmd.handler('debug clear', ctx as any);
-      expect(state.debugHistory.length).toBe(0);
+      expect(actions.clearDebugHistory).toHaveBeenCalled();
     });
 
     it('should handle /router reload config', async () => {

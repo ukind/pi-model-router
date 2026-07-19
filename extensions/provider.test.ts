@@ -287,6 +287,255 @@ describe('provider.ts', () => {
       );
     });
 
+    describe('in-tier fallback mutates target fields', () => {
+      it('reflects fallback model in decision when primary fails', async () => {
+        registerRouterProvider(mockPi, mockState, mockActions);
+        const stream = new MockEventStream();
+        vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+          stream as any,
+        );
+
+        vi.mocked(streamSimple).mockImplementation(((model: any) => {
+          if (model.id === 'gpt-4o-mini') {
+            return (async function* () {
+              throw new Error('primary failed');
+            })() as any;
+          }
+          return (async function* () {
+            yield { type: 'text_delta', delta: 'fallback answer' };
+            yield {
+              type: 'done',
+              message: { usage: { cost: { total: 0.0007 } } },
+            };
+          })() as any;
+        }) as any);
+
+        mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+        const model = {
+          id: 'balanced',
+          api: 'router-api',
+          provider: 'router',
+        } as any;
+        const context = {
+          messages: [{ role: 'user', content: 'hello' }],
+        } as any;
+
+        registeredProviderOptions.streamSimple(model, context);
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        expect(mockState.lastDecision.isFallback).toBe(true);
+        expect(mockState.lastDecision.targetProvider).toBe('google');
+        expect(mockState.lastDecision.targetModelId).toBe('gemini-1.5-flash');
+        expect(mockState.lastDecision.targetLabel).toBe(
+          'google/gemini-1.5-flash',
+        );
+        expect(mockState.lastDecision.reasoning).toContain(
+          'In-tier fallback to google/gemini-1.5-flash',
+        );
+        // phase is not mutated on in-tier fallback
+        expect(mockState.lastDecision.phase).toBe('implementation');
+      });
+    });
+
+    describe('Google continuation guard after in-tier fallback', () => {
+      it('routes back to the model that actually streamed', async () => {
+        registerRouterProvider(mockPi, mockState, mockActions);
+        const stream = new MockEventStream();
+        vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+          stream as any,
+        );
+
+        const triedModels: string[] = [];
+        vi.mocked(streamSimple).mockImplementation(((model: any) => {
+          triedModels.push(model.id);
+          return (async function* () {
+            yield { type: 'text_delta', delta: 'done' };
+          })() as any;
+        }) as any);
+
+        // Previous turn: in-tier fallback streamed gemini-2.5-flash
+        // (gemini-2.5-pro was the tier primary but failed first).
+        mockState.lastDecision = {
+          profile: 'balanced',
+          tier: 'high',
+          phase: 'planning',
+          targetProvider: 'google',
+          targetModelId: 'gemini-2.5-flash',
+          targetLabel: 'google/gemini-2.5-flash',
+          thinking: 'high',
+          timestamp: Date.now(),
+        };
+
+        // Force a new routing decision that resolves to a different
+        // google model so the guard's `targetLabel !== decision.targetLabel`
+        // check fires and escalates tier back to the previous one.
+        mockState.currentConfig.profiles.balanced.high = {
+          model: 'google/gemini-2.5-pro',
+          thinking: 'high',
+          fallbacks: ['google/gemini-2.5-flash'],
+        };
+        mockState.currentConfig.profiles.balanced.medium = {
+          model: 'google/gemini-2.0-flash',
+          thinking: 'medium',
+        };
+        mockState.currentConfig.profiles.balanced.low = {
+          model: 'google/gemini-2.0-flash',
+          thinking: 'low',
+        };
+
+        mockState.currentModelRegistry.find = (
+          provider: string,
+          modelId: string,
+        ) => {
+          return { provider, id: modelId, reasoning: true, input: ['text'] };
+        };
+
+        const model = {
+          id: 'balanced',
+          api: 'router-api',
+          provider: 'router',
+        } as any;
+        const context = {
+          messages: [
+            { role: 'user', content: 'initial', timestamp: Date.now() },
+            {
+              role: 'toolResult',
+              toolCallId: 'c1',
+              toolName: 't',
+              content: 'tool output',
+              isError: false,
+              timestamp: Date.now(),
+            },
+          ],
+        } as any;
+
+        registeredProviderOptions.streamSimple(model, context);
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        // The continuation guard must restore the previous model, and the
+        // prepend must put it first so the tier primary (gemini-2.5-pro,
+        // which failed in the previous turn) is NOT tried first.
+        expect(mockState.lastDecision.targetModelId).toBe('gemini-2.5-flash');
+        expect(mockState.lastDecision.reasoning).toContain(
+          'Preserved google/gemini-2.5-flash for a Google tool-result continuation',
+        );
+        expect(triedModels[0]).toBe('gemini-2.5-flash');
+        expect(triedModels).not.toContain('gemini-2.5-pro');
+      });
+    });
+
+    describe('cross-tier fallback', () => {
+      it('mutates decision when all in-tier models fail and next tier succeeds', async () => {
+        mockState.currentConfig.profiles.balanced.high = {
+          model: 'openai/gpt-4o',
+          fallbacks: ['google/gemini-pro'],
+        };
+        mockState.currentConfig.profiles.balanced.medium = {
+          model: 'openai/gpt-4o-mini',
+        };
+
+        registerRouterProvider(mockPi, mockState, mockActions);
+        const stream = new MockEventStream();
+        vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+          stream as any,
+        );
+
+        vi.mocked(streamSimple).mockImplementation(((model: any) => {
+          if (model.id === 'gpt-4o' || model.id === 'gemini-pro') {
+            return (async function* () {
+              throw new Error(`${model.id} failed`);
+            })() as any;
+          }
+          return (async function* () {
+            yield { type: 'text_delta', delta: 'medium tier answer' };
+            yield {
+              type: 'done',
+              message: { usage: { cost: { total: 0.0003 } } },
+            };
+          })() as any;
+        }) as any);
+
+        // Pin to high so the whole high tier (primary + fallback) is
+        // exhausted before the chain crosses to medium.
+        mockState.pinnedTierByProfile['balanced'] = 'high';
+
+        const model = {
+          id: 'balanced',
+          api: 'router-api',
+          provider: 'router',
+        } as any;
+        const context = {
+          messages: [{ role: 'user', content: 'hello' }],
+        } as any;
+
+        registeredProviderOptions.streamSimple(model, context);
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        expect(mockState.lastDecision.tier).toBe('medium');
+        expect(mockState.lastDecision.isFallback).toBe(true);
+        expect(mockState.lastDecision.targetProvider).toBe('openai');
+        expect(mockState.lastDecision.targetModelId).toBe('gpt-4o-mini');
+        expect(mockState.lastDecision.targetLabel).toBe('openai/gpt-4o-mini');
+        expect(mockState.lastDecision.reasoning).toContain(
+          'Cross-tier fallback from high to medium',
+        );
+        expect(mockState.accumulatedCost).toBe(0.0003);
+      });
+    });
+
+    describe('budget integration', () => {
+      it('downgrades routing when accumulatedCost >= maxSessionBudget', async () => {
+        mockState.currentConfig.maxSessionBudget = 0.5;
+        mockState.accumulatedCost = 0.6;
+
+        registerRouterProvider(mockPi, mockState, mockActions);
+        const stream = new MockEventStream();
+        vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+          stream as any,
+        );
+
+        const triedModels: string[] = [];
+        vi.mocked(streamSimple).mockImplementation(((model: any) => {
+          triedModels.push(model.id);
+          return (async function* () {
+            yield { type: 'text_delta', delta: 'budget answer' };
+            yield {
+              type: 'done',
+              message: { usage: { cost: { total: 0.0001 } } },
+            };
+          })() as any;
+        }) as any);
+
+        const model = {
+          id: 'balanced',
+          api: 'router-api',
+          provider: 'router',
+        } as any;
+        // 'carefully' is an explicit high hint — would normally route high.
+        const context = {
+          messages: [
+            { role: 'user', content: 'plan the architecture carefully' },
+          ],
+        } as any;
+
+        registeredProviderOptions.streamSimple(model, context);
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        expect(mockState.lastDecision.tier).toBe('medium');
+        expect(mockState.lastDecision.isBudgetForced).toBe(true);
+        expect(mockState.lastDecision.targetModelId).toBe('gpt-4o-mini');
+        expect(mockState.lastDecision.reasoning).toContain('Budget exceeded');
+        // Budget-exceeded chain is down-only: high must never be tried.
+        expect(triedModels).not.toContain('gpt-4o');
+        expect(triedModels[0]).toBe('gpt-4o-mini');
+      });
+    });
+
     it('should force higher tier if current tier does not support image attachments', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
       const stream = new MockEventStream();
@@ -299,18 +548,151 @@ describe('provider.ts', () => {
         })() as any,
       );
 
-      // Define medium tier model and fallback without image support, high tier model with image support
+      // Medium tier model and fallback lack image support; high tier supports images.
       mockState.currentModelRegistry.find = (
         provider: string,
         modelId: string,
       ) => {
         if (modelId === 'gpt-4o') {
-          return { provider, id: modelId, input: ['text', 'image'] }; // high does support image
+          return { provider, id: modelId, input: ['text', 'image'] };
         }
-        return { provider, id: modelId, input: ['text'] }; // medium and fallback gemini-1.5-flash don't support image
+        return { provider, id: modelId, input: ['text'] };
       };
 
-      // Force a medium tier routing decision originally
+      // No pin — heuristic routes to medium via 'implement' keyword.
+      // (Previously pinned medium; removed because the I2 gate now blocks
+      // promotion when pinnedTier is set.)
+
+      const model = {
+        id: 'balanced',
+        api: 'router-api',
+        provider: 'router',
+      } as any;
+      const context = {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'implement the fix' },
+              {
+                type: 'image' as const,
+                image: { mimeType: 'image/png', data: 'data' },
+              },
+            ],
+            timestamp: Date.now(),
+          },
+        ],
+      } as any;
+
+      registeredProviderOptions.streamSimple(model, context);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(mockState.lastDecision.tier).toBe('high');
+      expect(mockState.lastDecision.reasoning).toContain(
+        'Forced high tier because the originally routed medium tier does not support image attachments',
+      );
+    });
+
+    it('should NOT promote tier for images when budget is exceeded (I1)', async () => {
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      vi.mocked(streamSimple).mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'done' };
+        })() as any,
+      );
+
+      // Medium tier has no image support; high tier does.
+      mockState.currentModelRegistry.find = (
+        provider: string,
+        modelId: string,
+      ) => {
+        if (modelId === 'gpt-4o') {
+          return { provider, id: modelId, input: ['text', 'image'] };
+        }
+        return { provider, id: modelId, input: ['text'] };
+      };
+
+      // Simulate exceeded budget: cost >= budget.
+      mockState.currentConfig.maxSessionBudget = 1;
+      mockState.accumulatedCost = 10;
+
+      const model = {
+        id: 'balanced',
+        api: 'router-api',
+        provider: 'router',
+      } as any;
+      // 'carefully' is an explicit high hint → heuristic routes to high.
+      // Budget exceeded → downgrades to medium, isBudgetForced=true.
+      // Without the I1 gate, the promotion block would override the budget
+      // cap by promoting medium → high for image support. With the gate,
+      // promotion is skipped.
+      const context = {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text' as const,
+                text: 'plan the architecture carefully',
+              },
+              {
+                type: 'image' as const,
+                image: { mimeType: 'image/png', data: 'data' },
+              },
+            ],
+            timestamp: Date.now(),
+          },
+        ],
+      } as any;
+
+      registeredProviderOptions.streamSimple(model, context);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Tier stays at medium (budget downgrade from high). Promotion to
+      // high was blocked by the I1 gate even though high supports images.
+      expect(mockState.lastDecision.tier).not.toBe('high');
+      expect(mockState.lastDecision.isBudgetForced).toBe(true);
+      // The down-chain [medium, low] has no image-capable model; the
+      // delegation loop throws "Failed to delegate to any model in the chain".
+      // This is the expected I1 outcome (not a silent image drop) and the
+      // user-visible error should surface via the stream.
+      const errorEvent = stream.events.find((e: any) => e.type === 'error');
+      expect(errorEvent).toBeDefined();
+      expect(errorEvent.error.errorMessage).toContain(
+        'Failed to delegate to any model in the chain',
+      );
+    });
+
+    it('should NOT promote tier for images when tier is pinned (I2)', async () => {
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      vi.mocked(streamSimple).mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'done' };
+        })() as any,
+      );
+
+      // Medium tier has no image support; high tier does.
+      mockState.currentModelRegistry.find = (
+        provider: string,
+        modelId: string,
+      ) => {
+        if (modelId === 'gpt-4o') {
+          return { provider, id: modelId, input: ['text', 'image'] };
+        }
+        return { provider, id: modelId, input: ['text'] };
+      };
+
+      // Pin to medium tier (exists in profile, unlike 'low').
       mockState.pinnedTierByProfile['balanced'] = 'medium';
 
       const model = {
@@ -337,10 +719,15 @@ describe('provider.ts', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      // It should force switch to high tier because medium doesn't support images
-      expect(mockState.lastDecision.tier).toBe('high');
-      expect(mockState.lastDecision.reasoning).toContain(
-        'Forced high tier because the originally routed medium tier does not support image attachments',
+      // Without the I2 gate, the promotion block would override the pin by
+      // promoting medium → high for image support with 'Forced high tier...'
+      // reasoning. With the gate, promotion is skipped; medium is exhausted
+      // (no image models) and the tier chain falls through to high via
+      // cross-tier fallback — preserving pin provenance.
+      expect(mockState.lastDecision.isPinned).toBe(true);
+      expect(mockState.lastDecision.isFallback).toBe(true);
+      expect(mockState.lastDecision.reasoning).not.toContain(
+        'Forced high tier because the originally routed',
       );
     });
 

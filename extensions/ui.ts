@@ -21,16 +21,13 @@ export const getDecisionFlags = (decision: RoutingDecision): string[] => {
   if (decision.isRuleMatched) flags.push('rule');
   if (decision.isClassifier) flags.push('classifier');
   if (decision.isVetoed) flags.push('vetoed');
+  if (decision.isPinned) flags.push('pin');
   return flags;
 };
 
 export const formatDecision = (decision: RoutingDecision): string => {
   const confidence = decision.confidence ? ` {${decision.confidence}}` : '';
-  const failure =
-    decision.failureReason && decision.failureReason !== 'success'
-      ? ` <${decision.failureReason}>`
-      : '';
-  return `${decision.profile}: ${decision.tier} -> ${decision.targetProvider}/${decision.targetModelId} [${decision.thinking}] (${decision.reasoning})${confidence}${failure}`;
+  return `${decision.profile}: ${decision.tier} -> ${decision.targetProvider}/${decision.targetModelId} [${decision.thinking}] (${decision.reasoning})${confidence}`;
 };
 
 export const formatPinSummary = (

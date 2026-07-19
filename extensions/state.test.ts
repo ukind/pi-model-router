@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { isRouterPersistedState, buildPersistedState } from './state';
+import {
+  isRouterPersistedState,
+  sanitizeRoutingDecisionFields,
+  buildPersistedState,
+} from './state';
 import type { RoutingDecision } from './types';
 
 describe('state.ts', () => {
@@ -117,15 +121,33 @@ describe('state.ts', () => {
       ).toBe(false);
     });
 
-    it('should reject invalid lastDecision shape', () => {
+    it('should still reject lastDecision with bad required fields', () => {
       expect(
         isRouterPersistedState({
           enabled: true,
           selectedProfile: 'x',
           timestamp: 1,
-          lastDecision: { profile: 'x' },
+          lastDecision: { profile: 'x' }, // missing tier + timestamp
         }),
       ).toBe(false);
+    });
+
+    it('should ACCEPT lastDecision with bad optional fields (per-field drop)', () => {
+      // Q2: a corrupt optional flag no longer discards the whole state.
+      expect(
+        isRouterPersistedState({
+          enabled: true,
+          selectedProfile: 'x',
+          timestamp: 1,
+          lastDecision: {
+            profile: 'x',
+            tier: 'high',
+            timestamp: 1,
+            isPinned: 'yes', // invalid type — sanitizer will strip
+            phase: 'running', // invalid — sanitizer will default to 'implementation'
+          },
+        }),
+      ).toBe(true);
     });
   });
 
@@ -164,7 +186,6 @@ describe('state.ts', () => {
       expect(state.debugEnabled).toBe(true);
       expect(state.widgetEnabled).toBe(false);
       expect(state.debugHistory).toEqual([decision]);
-      expect(state.lastPhase).toBe('planning');
       expect(state.lastDecision).toEqual(decision);
       expect(state.lastNonRouterModel).toBe('openai/gpt-4o');
       expect(state.accumulatedCost).toBe(0.0045);
@@ -186,6 +207,136 @@ describe('state.ts', () => {
       );
       expect(state.selectedProfile).toBe('');
       expect(state.pinTier).toBeUndefined();
+    });
+  });
+
+  describe('sanitizeRoutingDecisionFields', () => {
+    const minimal = {
+      profile: 'balanced',
+      tier: 'high' as const,
+      timestamp: 1700000000000,
+    };
+
+    it('accepts a minimal decision (only required fields)', () => {
+      const out = sanitizeRoutingDecisionFields(minimal);
+      expect(out).toBeDefined();
+      expect(out?.profile).toBe('balanced');
+      expect(out?.tier).toBe('high');
+      expect(out?.timestamp).toBe(1700000000000);
+      expect(out?.phase).toBe('implementation');
+      expect(out?.targetProvider).toBe('');
+      expect(out?.targetModelId).toBe('');
+      expect(out?.targetLabel).toBe('');
+      expect(out?.reasoning).toBe('');
+      expect(out?.thinking).toBe('medium');
+    });
+
+    it('preserves all valid optional fields', () => {
+      const out = sanitizeRoutingDecisionFields({
+        ...minimal,
+        phase: 'planning',
+        targetProvider: 'openai',
+        targetModelId: 'gpt-4o',
+        targetLabel: 'openai/gpt-4o',
+        reasoning: 'rules matched',
+        thinking: 'high',
+        isClassifier: true,
+        isFallback: false,
+        isBudgetForced: false,
+        isRuleMatched: true,
+        isPinned: false,
+        isVetoed: false,
+        vetoReason: 'explicit-hint',
+        confidence: 'high',
+        rawText: 'tier: high',
+        failureReason: 'success',
+      });
+      expect(out?.phase).toBe('planning');
+      expect(out?.thinking).toBe('high');
+      expect(out?.isClassifier).toBe(true);
+      expect(out?.isRuleMatched).toBe(true);
+      expect(out?.vetoReason).toBe('explicit-hint');
+      expect(out?.confidence).toBe('high');
+      expect(out?.rawText).toBe('tier: high');
+      expect(out?.failureReason).toBe('success');
+    });
+
+    it('drops invalid boolean flags but keeps the rest', () => {
+      const out = sanitizeRoutingDecisionFields({
+        ...minimal,
+        isPinned: 'yes', // not a boolean
+        isClassifier: 1, // not a boolean
+        isBudgetForced: true, // valid
+      });
+      expect(out?.isPinned).toBeUndefined();
+      expect(out?.isClassifier).toBeUndefined();
+      expect(out?.isBudgetForced).toBe(true);
+    });
+
+    it('defaults invalid string fields to "" but keeps the rest', () => {
+      const out = sanitizeRoutingDecisionFields({
+        ...minimal,
+        targetProvider: 123, // not a string
+        targetLabel: 'openai/gpt-4o', // valid
+        reasoning: null, // not a string
+      });
+      expect(out?.targetProvider).toBe('');
+      expect(out?.targetLabel).toBe('openai/gpt-4o');
+      expect(out?.reasoning).toBe('');
+    });
+
+    it('defaults invalid phase to "implementation" and invalid thinking to "medium"', () => {
+      const out = sanitizeRoutingDecisionFields({
+        ...minimal,
+        phase: 'running',
+        thinking: 'super-high',
+      });
+      expect(out?.phase).toBe('implementation');
+      expect(out?.thinking).toBe('medium');
+    });
+
+    it('rejects (returns undefined) when profile is missing', () => {
+      expect(
+        sanitizeRoutingDecisionFields({ tier: 'high', timestamp: 1 }),
+      ).toBeUndefined();
+    });
+
+    it('rejects (returns undefined) when tier is invalid', () => {
+      expect(
+        sanitizeRoutingDecisionFields({
+          profile: 'x',
+          tier: 'ultra',
+          timestamp: 1,
+        }),
+      ).toBeUndefined();
+    });
+
+    it('rejects (returns undefined) when timestamp is not a number', () => {
+      expect(
+        sanitizeRoutingDecisionFields({
+          profile: 'x',
+          tier: 'high',
+          timestamp: '1',
+        }),
+      ).toBeUndefined();
+    });
+
+    it('rejects (returns undefined) when value is not an object', () => {
+      expect(sanitizeRoutingDecisionFields('nope')).toBeUndefined();
+      expect(sanitizeRoutingDecisionFields(null)).toBeUndefined();
+      expect(sanitizeRoutingDecisionFields(undefined)).toBeUndefined();
+    });
+
+    it('drops invalid confidence / vetoReason / failureReason but keeps the rest', () => {
+      const out = sanitizeRoutingDecisionFields({
+        ...minimal,
+        confidence: 'super-high', // invalid
+        vetoReason: 'something-else', // invalid
+        failureReason: 'crashed', // invalid
+      });
+      expect(out?.confidence).toBeUndefined();
+      expect(out?.vetoReason).toBeUndefined();
+      expect(out?.failureReason).toBeUndefined();
     });
   });
 });

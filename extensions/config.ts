@@ -9,6 +9,7 @@ import type {
   ConfigLoadResult,
   ParsedConfigFile,
   RouterTier,
+  RouterPhase,
   RoutingRule,
   ModelDefinition,
   ClassifierConfig,
@@ -44,6 +45,9 @@ export const isThinkingLevel = (value: unknown): value is ThinkingLevel =>
 
 export const isRouterTier = (value: unknown): value is RouterTier =>
   value === 'high' || value === 'medium' || value === 'low';
+
+export const isRouterPhase = (value: unknown): value is RouterPhase =>
+  value === 'planning' || value === 'implementation' || value === 'lightweight';
 
 export const parseConfigFile = (path: string): ParsedConfigFile => {
   if (!existsSync(path)) {
@@ -678,17 +682,12 @@ const tierSupportsReasoning = (
  *
  * An unavailable registry short-circuits to "all supported" — without a
  * registry the predicate cannot be evaluated and a warning would be noise.
- * The registry param is optional so 2-arg callers compile while warning
- * sites are migrated. The `level === 'off'` short-circuit was removed
- * (Decision 9) so callers warn even for 'off' when tiers lack reasoning.
  */
 export const getUnsupportedTiers = (
   profile: RouterProfile,
-  level: ThinkingLevel,
   modelRegistry?: ExtensionContext['modelRegistry'],
 ): string[] => {
   // ponytail: !modelRegistry short-circuit kept — cannot evaluate capabilities without registry.
-  // 'off' short-circuit removed (Decision 9) — warn even for 'off' if tiers lack reasoning.
   if (!modelRegistry) return [];
   const unsupported: string[] = [];
   for (const tier of ROUTER_TIERS) {

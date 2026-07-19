@@ -57,6 +57,7 @@ export const registerCommands = (
       strict?: boolean,
     ) => Promise<boolean>;
     syncPiThinkingLevel: (level: ThinkingLevel) => void;
+    clearDebugHistory: () => void;
   },
 ) => {
   const SUBCOMMAND_DETAILS = [
@@ -141,7 +142,7 @@ export const registerCommands = (
       return null;
     }
 
-    if ((tierValues as string[]).includes(args[0])) {
+    if ((tierValues as string[]).includes(args[0]) || args[0] === 'all') {
       const tier = args[0];
       const levelPrefix = args[1] ?? '';
       return levelValues
@@ -320,20 +321,13 @@ export const registerCommands = (
         levelValue = args[1];
       } else {
         ctx.ui.notify(
-          `Invalid tier: ${args[0]}. Use high, medium, or low.`,
+          `Invalid tier: ${args[0]}. Use high, medium, low, or all.`,
           'error',
         );
         return;
       }
     }
 
-    if (tier !== 'all' && !tierValues.includes(tier as string)) {
-      ctx.ui.notify(
-        `Invalid tier: ${tier}. Use high, medium, or low.`,
-        'error',
-      );
-      return;
-    }
     if (!levelValues.includes(levelValue)) {
       ctx.ui.notify(
         `Invalid thinking level: ${levelValue}. Use auto or: ${THINKING_LEVELS.join(', ')}`,
@@ -376,7 +370,6 @@ export const registerCommands = (
     if (nextLevel && nextLevel !== 'off') {
       const unsupported = getUnsupportedTiers(
         state.currentConfig.profiles[currentProfile],
-        nextLevel,
         ctx.modelRegistry,
       );
       if (unsupported.length > 0) {
@@ -473,7 +466,7 @@ export const registerCommands = (
     const cmd = args[0]?.toLowerCase();
     if (cmd === 'on') state.debugEnabled = true;
     else if (cmd === 'off') state.debugEnabled = false;
-    else if (cmd === 'clear') state.debugHistory.length = 0;
+    else if (cmd === 'clear') actions.clearDebugHistory();
     else if (cmd === 'show') {
       if (state.debugHistory.length === 0) {
         ctx.ui.notify('No recent routing decisions.', 'info');

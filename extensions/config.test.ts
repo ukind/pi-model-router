@@ -514,9 +514,7 @@ describe('config.ts', () => {
         'openai/gpt-4o-micro': false,
       });
       // high + low reason (gpt-4o); medium's primary + fallback both lack it
-      expect(getUnsupportedTiers(profile, 'high', registry as any)).toEqual([
-        'medium',
-      ]);
+      expect(getUnsupportedTiers(profile, registry as any)).toEqual(['medium']);
     });
 
     it('returns [] when each tier has at least one reasoning-capable model', () => {
@@ -529,7 +527,7 @@ describe('config.ts', () => {
         'openai/gpt-4o': true,
         'openai/gpt-4o-mini': false,
       });
-      expect(getUnsupportedTiers(profile, 'high', registry as any)).toEqual([]);
+      expect(getUnsupportedTiers(profile, registry as any)).toEqual([]);
     });
 
     it('skips missing tiers (undefined tier config)', () => {
@@ -537,7 +535,7 @@ describe('config.ts', () => {
         high: { model: 'openai/gpt-4o' },
       };
       const registry = buildRegistry({ 'openai/gpt-4o': true });
-      expect(getUnsupportedTiers(profile, 'low', registry as any)).toEqual([]);
+      expect(getUnsupportedTiers(profile, registry as any)).toEqual([]);
     });
 
     it('flags a tier whose models are all absent from the registry (registry-miss)', () => {
@@ -546,26 +544,14 @@ describe('config.ts', () => {
       };
       const registry = buildRegistry({});
       // Registry-miss → unsupported matches runtime falsy gate
-      expect(getUnsupportedTiers(profile, 'high', registry as any)).toEqual([
-        'high',
-      ]);
-    });
-
-    it('returns unsupported tiers for level "off" when registry present (off short-circuit removed)', () => {
-      const profile: RouterProfile = {
-        high: { model: 'openai/gpt-4o' },
-      };
-      const registry = buildRegistry({ 'openai/gpt-4o': false });
-      expect(getUnsupportedTiers(profile, 'off', registry as any)).toEqual([
-        'high',
-      ]);
+      expect(getUnsupportedTiers(profile, registry as any)).toEqual(['high']);
     });
 
     it('returns [] when registry is undefined', () => {
       const profile: RouterProfile = {
         high: { model: 'openai/gpt-4o' },
       };
-      expect(getUnsupportedTiers(profile, 'high', undefined)).toEqual([]);
+      expect(getUnsupportedTiers(profile, undefined)).toEqual([]);
     });
   });
 

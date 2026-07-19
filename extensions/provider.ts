@@ -367,7 +367,10 @@ export const registerRouterProvider = (
 
           // Image-attachment tier promotion
           const imageAttached = hasImageAttachment(context);
-          if (imageAttached) {
+          // I1+I2: skip promotion when budget is exceeded (the budget cap must be
+          // honored even when the downgraded tier lacks image-capable models) or
+          // when the user pinned a tier (the pin promise must be honored).
+          if (imageAttached && !isBudgetExceeded && !pinnedTier) {
             const checkModelSupportsImage = (modelRef: string) => {
               try {
                 const { provider: p, modelId: m } =
@@ -467,6 +470,19 @@ export const registerRouterProvider = (
               tierConfig.model,
               ...(tierConfig.fallbacks ?? []),
             ];
+            if (
+              isGoogleThinkingToolContinuation &&
+              previousDecision &&
+              currentTier === originalTier
+            ) {
+              // Prepend the previously-successful model so the continuation
+              // guard actually takes effect after an in-tier fallback (the
+              // tier primary would otherwise be tried first). Gated to the
+              // original tier so later cross-tier iterations don't prepend a
+              // wrong-tier model. Duplicates are harmless (the inner loop
+              // breaks on first success).
+              modelsToTry = [previousDecision.targetLabel, ...modelsToTry];
+            }
             if (imageAttached) {
               modelsToTry = modelsToTry.filter((modelRef) => {
                 try {
@@ -614,21 +630,35 @@ export const registerRouterProvider = (
                   decision.targetProvider = targetProvider;
                   decision.targetModelId = targetModelId;
                   decision.targetLabel = modelRef;
-                  // Refresh thinking to the fallback tier (override > tier-configured > tier-default)
-                  const fbBase =
-                    profile[currentTier]?.thinking ??
-                    (currentTier === 'high'
-                      ? 'high'
-                      : currentTier === 'low'
-                        ? 'low'
-                        : 'medium');
+                  // Refresh thinking to the fallback tier (override > tier-configured)
+                  // `fbBase` chain was unreachable: normalizeTierConfig (config.ts)
+                  // always sets `thinking` on the production config path, and this
+                  // branch only runs against already-normalized config. The
+                  // `?? 'medium'` is a defensive backstop for the type system.
                   decision.thinking =
-                    state.thinkingByProfile[model.id]?.[currentTier] ?? fbBase;
+                    state.thinkingByProfile[model.id]?.[currentTier] ??
+                    tierConfig.thinking ??
+                    'medium';
                   decision.reasoning =
                     `Cross-tier fallback from ${originalTier} to ${currentTier} after in-tier exhaustion. ` +
                     `(Original: ${decision.reasoning})`;
                 } else if (i > 0) {
+                  // In-tier fallback: the model that actually streamed is
+                  // `modelRef`, not the tier primary. Update decision fields
+                  // so the Google continuation guard sees the real model next
+                  // turn. (Do NOT mutate `decision.phase` here — the
+                  // classifier-decoupled value must survive an in-tier
+                  // fallback to preserve the sticky-phase heuristic.)
                   decision.isFallback = true;
+                  decision.tier = currentTier;
+                  decision.targetProvider = targetProvider;
+                  decision.targetModelId = targetModelId;
+                  decision.targetLabel = modelRef;
+                  decision.thinking =
+                    state.thinkingByProfile[model.id]?.[currentTier] ??
+                    tierConfig.thinking ??
+                    'medium';
+                  decision.reasoning = `In-tier fallback to ${modelRef}. (Original: ${decision.reasoning})`;
                 }
                 if (state.lastExtensionContext && decision.isFallback) {
                   actions.updateStatus(state.lastExtensionContext);

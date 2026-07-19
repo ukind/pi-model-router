@@ -21,7 +21,11 @@ import {
   getUnsupportedTiers,
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
-import { isRouterPersistedState, buildPersistedState } from './state';
+import {
+  isRouterPersistedState,
+  sanitizeRoutingDecisionFields,
+  buildPersistedState,
+} from './state';
 import {
   updateStatus,
   formatModelRef,
@@ -88,26 +92,27 @@ const routerExtension = (pi: ExtensionAPI) => {
   };
 
   const recordDebugDecision = (decision: RoutingDecision) => {
-    // Clone before pushing — Phase 2's cross-tier branch mutates the live `decision` reference in place
+    // Clone before pushing — the cross-tier fallback branch mutates the live
+    // `decision` reference in place.
     debugHistory = [...debugHistory, { ...decision }].slice(-MAX_DEBUG_HISTORY);
     if (debugEnabled && lastExtensionContext) {
+      // Priority order for the notification source label;
+      // `getDecisionFlags` (ui.ts) accumulates all applicable flags into an
+      // array for the widget — it is not a priority selector. The two
+      // consumers intentionally diverge: the chain is single-winner
+      // (one canonical source label per decision), the flag list is
+      // exhaustive provenance (all applicable flags for the widget).
       let source: string;
       if (decision.isBudgetForced) source = 'budget';
+      else if (decision.isVetoed) source = 'vetoed';
       else if (decision.isClassifier) source = 'classifier';
       else if (decision.isRuleMatched) source = 'rule';
-      // NEW — structured isPinned flag (Decision 10), replaces fragile reasoning.includes sniff.
-      // Check isFallback first so pinned-then-fallbacked decisions classify as 'fallback' not 'pin'.
       else if (decision.isFallback) source = 'fallback';
       else if (decision.isPinned) source = 'pin';
       else source = 'heuristic';
-      // Phase 5: append confidence + failureReason when classifier-driven (observability)
       const provenance =
         decision.isClassifier && decision.confidence
-          ? ` (confidence: ${decision.confidence}${
-              decision.failureReason && decision.failureReason !== 'success'
-                ? `, ${decision.failureReason}`
-                : ''
-            })`
+          ? ` (confidence: ${decision.confidence})`
           : '';
       lastExtensionContext.ui.notify(
         `router → ${decision.targetProvider}/${decision.targetModelId} [${decision.tier}, ${source}]${provenance}`,
@@ -118,6 +123,10 @@ const routerExtension = (pi: ExtensionAPI) => {
 
   const getThinkingOverride = (profileName: string, tier: RouterTier) => {
     return thinkingByProfile[profileName]?.[tier];
+  };
+
+  const clearDebugHistory = () => {
+    debugHistory = [];
   };
 
   const persistState = () => {
@@ -154,6 +163,7 @@ const routerExtension = (pi: ExtensionAPI) => {
   const actions = {
     persistState,
     syncPiThinkingLevel: setThinkingLevelInternally,
+    clearDebugHistory,
     updateStatus: (ctx: ExtensionContext) =>
       updateStatus(
         ctx,
@@ -221,8 +231,6 @@ const routerExtension = (pi: ExtensionAPI) => {
 
       // Ensure the provider is registered with current capacities for this profile
       actions.registerRouterProvider();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
       const routerModel = ctx.modelRegistry.find('router', profileName);
       if (!routerModel) {
         ctx.ui.notify(`Unknown router profile: ${profileName}`, 'error');
@@ -307,9 +315,6 @@ const routerExtension = (pi: ExtensionAPI) => {
     currentCwd = ctx.cwd;
     actions.reloadConfig(ctx);
 
-    // Give the registry a moment to synchronize after re-registration
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
     routerEnabled = ctx.model?.provider === 'router';
     selectedProfile =
       ctx.model?.provider === 'router'
@@ -362,7 +367,11 @@ const routerExtension = (pi: ExtensionAPI) => {
         : [];
       lastNonRouterModel = savedState.lastNonRouterModel ?? lastNonRouterModel;
       accumulatedCost = savedState.accumulatedCost ?? 0;
-      lastDecision = savedState.lastDecision;
+      // Q2: per-field sanitize — strip invalid optional fields, keep required.
+      // If required fields were bad, isRouterPersistedState already rejected
+      // the state and the consumer is skipped. `savedState.lastDecision` here
+      // is guaranteed to be a valid object with valid required fields.
+      lastDecision = sanitizeRoutingDecisionFields(savedState.lastDecision);
     }
 
     await actions.ensureValidActiveRouterProfile(ctx);
@@ -521,7 +530,6 @@ const routerExtension = (pi: ExtensionAPI) => {
     if (event.level !== 'off') {
       const unsupported = getUnsupportedTiers(
         currentConfig.profiles[selectedProfile],
-        event.level,
         ctx.modelRegistry,
       );
       if (unsupported.length > 0) {

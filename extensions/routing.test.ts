@@ -6,10 +6,10 @@ import {
   countToolResults,
   countWords,
   hasImageAttachment,
-  containsAny,
   phaseForTier,
   resolveAvailableTier,
   buildRoutingDecision,
+  buildDelegationTierChain,
   decideRouting,
   parseClassifierOutput,
   runClassifier,
@@ -145,13 +145,6 @@ describe('routing.ts', () => {
         ],
       };
       expect(hasImageAttachment(context)).toBe(false);
-    });
-  });
-
-  describe('containsAny', () => {
-    it('should check if string contains any keyword', () => {
-      expect(containsAny('hello world', ['earth', 'world'])).toBe(true);
-      expect(containsAny('hello world', ['mars'])).toBe(false);
     });
   });
 
@@ -365,6 +358,33 @@ describe('routing.ts', () => {
       );
       expect(decision.tier).toBe('medium');
       expect(decision.isBudgetForced).toBe(true);
+    });
+
+    it('should mark isBudgetForced when tier is already low and budget is exceeded (Q3 floor)', () => {
+      // Short prompt with no high-hint / implementation / planning / lookup
+      // keywords. Falls through the heuristic to the `wordCount <= lowThreshold`
+      // branch which picks tier='low'.
+      const context: Context = {
+        messages: [
+          { role: 'user', content: 'hi there', timestamp: Date.now() },
+        ],
+      };
+      const decision = decideRouting(
+        context,
+        'p',
+        profile,
+        undefined,
+        undefined,
+        undefined,
+        0.5,
+        undefined,
+        true, // isBudgetExceeded
+      );
+      expect(decision.tier).toBe('low');
+      expect(decision.isBudgetForced).toBe(true);
+      expect(decision.reasoning).toContain('lowest tier');
+      // Phase remains whatever the lightweight heuristic picked.
+      expect(decision.phase).toBe('lightweight');
     });
 
     it('should maintain planning phase bias (stickiness)', () => {
@@ -732,6 +752,61 @@ describe('routing.ts', () => {
       expect(decision.failureReason).toBe('success');
       expect(decision.isClassifier).toBe(true);
     });
+
+    describe('word-boundary veto', () => {
+      it('does not false-veto high when "smallest" contains "small"', () => {
+        const context: Context = {
+          messages: [
+            {
+              role: 'user',
+              content: 'smallest possible deployment footprint',
+              timestamp: Date.now(),
+            },
+          ],
+        };
+        const decision = decideRouting(
+          context,
+          'p',
+          profile,
+          undefined,
+          undefined,
+          undefined,
+          0.5,
+          undefined,
+          false,
+          classifierHigh(),
+        );
+        expect(decision.tier).toBe('high');
+        expect(decision.isVetoed).toBeUndefined();
+      });
+
+      it('matches phrase hints via substring fallback', () => {
+        const context: Context = {
+          messages: [
+            {
+              role: 'user',
+              content: 'step by step please',
+              timestamp: Date.now(),
+            },
+          ],
+        };
+        const decision = decideRouting(
+          context,
+          'p',
+          profile,
+          undefined,
+          undefined,
+          undefined,
+          0.5,
+          undefined,
+          false,
+          classifierLow(),
+        );
+        expect(decision.tier).toBe('high');
+        expect(decision.isVetoed).toBe(true);
+        expect(decision.vetoReason).toBe('explicit-hint');
+      });
+    });
   });
 
   describe('parseClassifierOutput', () => {
@@ -958,6 +1033,51 @@ describe('routing.ts', () => {
       );
       expect(result?.tier).toBe('high');
       expect(callCount).toBe(1);
+    });
+  });
+
+  describe('buildDelegationTierChain', () => {
+    it('high, non-budget → [high, medium, low]', () => {
+      expect(buildDelegationTierChain('high', false)).toEqual([
+        'high',
+        'medium',
+        'low',
+      ]);
+    });
+
+    it('high, budget → [high, medium, low]', () => {
+      expect(buildDelegationTierChain('high', true)).toEqual([
+        'high',
+        'medium',
+        'low',
+      ]);
+    });
+
+    it('medium, non-budget → [medium, low, high]', () => {
+      expect(buildDelegationTierChain('medium', false)).toEqual([
+        'medium',
+        'low',
+        'high',
+      ]);
+    });
+
+    it('medium, budget → [medium, low]', () => {
+      expect(buildDelegationTierChain('medium', true)).toEqual([
+        'medium',
+        'low',
+      ]);
+    });
+
+    it('low, non-budget → [low, medium, high]', () => {
+      expect(buildDelegationTierChain('low', false)).toEqual([
+        'low',
+        'medium',
+        'high',
+      ]);
+    });
+
+    it('low, budget → [low]', () => {
+      expect(buildDelegationTierChain('low', true)).toEqual(['low']);
     });
   });
 });

@@ -72,10 +72,6 @@ export const hasImageAttachment = (context: Context): boolean => {
   );
 };
 
-export const containsAny = (text: string, keywords: string[]): boolean => {
-  return keywords.some((keyword) => text.includes(keyword));
-};
-
 // ponytail: module-level cache avoids recompiling regex per call
 const wordBoundaryRegexCache = new Map<string, RegExp>();
 
@@ -89,8 +85,16 @@ const wordBoundaryRegex = (keyword: string): RegExp => {
   return r;
 };
 
-export const containsAnyWord = (text: string, keywords: string[]): boolean =>
-  keywords.some((keyword) => wordBoundaryRegex(keyword).test(text));
+export const containsAnyWord = (text: string, keywords: string[]): boolean => {
+  const lcText = text.toLowerCase();
+  return keywords.some((keyword) => {
+    if (/\s/.test(keyword)) {
+      // Multi-word phrase: substring match (no word-boundary semantics for phrases)
+      return lcText.includes(keyword.toLowerCase());
+    }
+    return wordBoundaryRegex(keyword).test(lcText);
+  });
+};
 
 export const phaseForTier = (tier: RouterTier): RouterPhase => {
   if (tier === 'high') return 'planning';
@@ -330,8 +334,8 @@ export const decideRouting = (
       isClassifier = true;
       let candidateTier = classifierResult.tier;
       // Veto: explicit hints override classifier (Decision 1)
-      const promptHasHighHint = containsAny(prompt, explicitHighHints);
-      const promptHasLowHint = containsAny(prompt, explicitLowHints);
+      const promptHasHighHint = containsAnyWord(prompt, explicitHighHints);
+      const promptHasLowHint = containsAnyWord(prompt, explicitLowHints);
       if (promptHasHighHint && candidateTier !== 'high') {
         candidateTier = 'high';
         isVetoed = true;
@@ -362,22 +366,22 @@ export const decideRouting = (
             : 0),
       );
 
-      if (containsAny(prompt, explicitHighHints)) {
+      if (containsAnyWord(prompt, explicitHighHints)) {
         phase = 'planning';
         tier = 'high';
         reasoning =
           'Detected an explicit request for deeper or higher-quality reasoning.';
-      } else if (containsAny(prompt, explicitLowHints)) {
+      } else if (containsAnyWord(prompt, explicitLowHints)) {
         phase = 'lightweight';
         tier = 'low';
         reasoning =
           'Detected an explicit request for a faster or lighter response.';
-      } else if (containsAny(prompt, summaryKeywords)) {
+      } else if (containsAnyWord(prompt, summaryKeywords)) {
         phase = 'lightweight';
         tier = 'low';
         reasoning = 'Detected summary or lightweight transformation keywords.';
       } else if (
-        containsAny(prompt, planningKeywords) ||
+        containsAnyWord(prompt, planningKeywords) ||
         prompt.startsWith('why ') ||
         wordCount >= highThreshold ||
         multiLinePrompt
@@ -388,13 +392,13 @@ export const decideRouting = (
           previousDecision?.phase === 'planning'
             ? 'Continued planning phase based on complexity or keywords.'
             : 'Detected planning, broad analysis, or a high-complexity request.';
-      } else if (containsAny(prompt, implementationKeywords)) {
+      } else if (containsAnyWord(prompt, implementationKeywords)) {
         phase = 'implementation';
         tier = 'medium';
         reasoning =
           'Detected implementation-oriented work with bounded execution scope.';
       } else if (
-        containsAny(prompt, lookupKeywords) &&
+        containsAnyWord(prompt, lookupKeywords) &&
         wordCount <= 24 &&
         toolResultCount === 0
       ) {
@@ -437,6 +441,14 @@ export const decideRouting = (
     tier = 'low';
     phase = 'lightweight';
     reasoning = `Budget exceeded. Downgraded from medium to low tier. (Original: ${reasoning})`;
+    isBudgetForced = true;
+  } else if (isBudgetExceeded && tier === 'low') {
+    // Q3: floor case — cannot downgrade further; still mark budget-forced
+    // so consumers (notify, widget) surface the exceeded-budget signal.
+    // tier + phase stay as the heuristic picked them; reasoning is the
+    // floor-warning variant (no "Downgraded" claim since no downgrade
+    // happened).
+    reasoning = `Budget exceeded; already at lowest tier — no further downgrade possible. (Original: ${reasoning})`;
     isBudgetForced = true;
   }
 
