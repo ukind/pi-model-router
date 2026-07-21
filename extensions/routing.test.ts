@@ -10,6 +10,7 @@ import {
   resolveAvailableTier,
   buildRoutingDecision,
   buildDelegationTierChain,
+  buildClassifierPrompt,
   decideRouting,
   parseClassifierOutput,
   runClassifier,
@@ -559,7 +560,7 @@ describe('routing.ts', () => {
       failureReason: 'success',
     });
 
-    it('veto: ultrathink + classifier low → high, isVetoed true', () => {
+    it('veto: ultrathink + classifier low (high confidence) → classifier wins (confidence-aware veto)', () => {
       const context: Context = {
         messages: [
           {
@@ -581,13 +582,14 @@ describe('routing.ts', () => {
         false,
         classifierLow(),
       );
-      expect(decision.tier).toBe('high');
-      expect(decision.isVetoed).toBe(true);
-      expect(decision.vetoReason).toBe('explicit-hint');
-      expect(decision.reasoning).toContain('vetoed');
+      expect(decision.tier).toBe('low');
+      expect(decision.isVetoed).toBeUndefined();
+      expect(decision.classifierAttempted).toBe(true);
+      expect(decision.classifierTier).toBe('low');
+      expect(decision.vetoOutcome).toBe('classifier-wins');
     });
 
-    it('veto: fast + classifier high → low, isVetoed true', () => {
+    it('veto: fast + classifier high (high confidence) → classifier wins (confidence-aware veto)', () => {
       const context: Context = {
         messages: [
           {
@@ -609,9 +611,11 @@ describe('routing.ts', () => {
         false,
         classifierHigh(),
       );
-      expect(decision.tier).toBe('low');
-      expect(decision.isVetoed).toBe(true);
-      expect(decision.vetoReason).toBe('explicit-hint');
+      expect(decision.tier).toBe('high');
+      expect(decision.isVetoed).toBeUndefined();
+      expect(decision.classifierAttempted).toBe(true);
+      expect(decision.classifierTier).toBe('high');
+      expect(decision.vetoOutcome).toBe('classifier-wins');
     });
 
     it('no veto when classifier agrees with hint (high hint + classifier high)', () => {
@@ -780,7 +784,7 @@ describe('routing.ts', () => {
         expect(decision.isVetoed).toBeUndefined();
       });
 
-      it('matches phrase hints via substring fallback', () => {
+      it('matches phrase hints via substring fallback (classifier high confidence wins)', () => {
         const context: Context = {
           messages: [
             {
@@ -802,9 +806,11 @@ describe('routing.ts', () => {
           false,
           classifierLow(),
         );
-        expect(decision.tier).toBe('high');
-        expect(decision.isVetoed).toBe(true);
-        expect(decision.vetoReason).toBe('explicit-hint');
+        expect(decision.tier).toBe('low');
+        expect(decision.isVetoed).toBeUndefined();
+        expect(decision.classifierAttempted).toBe(true);
+        expect(decision.classifierTier).toBe('low');
+        expect(decision.vetoOutcome).toBe('classifier-wins');
       });
     });
   });
@@ -1078,6 +1084,102 @@ describe('routing.ts', () => {
 
     it('low, budget → [low]', () => {
       expect(buildDelegationTierChain('low', true)).toEqual(['low']);
+    });
+  });
+
+  describe('buildClassifierPrompt', () => {
+    it('includes the prompt text', () => {
+      const prompt = buildClassifierPrompt({
+        promptText: 'refactor the auth module',
+        historyText: '',
+        toolResultCount: 0,
+        wordCount: 4,
+        multiLinePrompt: false,
+      });
+      expect(prompt).toContain('refactor the auth module');
+    });
+
+    it('includes phase context when provided', () => {
+      const prompt = buildClassifierPrompt({
+        promptText: 'design the new API',
+        historyText: '',
+        toolResultCount: 0,
+        wordCount: 5,
+        multiLinePrompt: false,
+        currentPhase: 'planning',
+      });
+      expect(prompt).toContain('Current conversation phase: planning');
+      expect(prompt).toContain('planning phase');
+    });
+
+    it('includes image note when hasImage is true', () => {
+      const prompt = buildClassifierPrompt({
+        promptText: 'what is this',
+        historyText: '',
+        toolResultCount: 0,
+        wordCount: 3,
+        multiLinePrompt: false,
+        hasImage: true,
+      });
+      expect(prompt).toContain('attached an image');
+    });
+
+    it('omits image note when hasImage is false', () => {
+      const prompt = buildClassifierPrompt({
+        promptText: 'what is this',
+        historyText: '',
+        toolResultCount: 0,
+        wordCount: 3,
+        multiLinePrompt: false,
+        hasImage: false,
+      });
+      expect(prompt).not.toContain('attached an image');
+    });
+
+    it('includes tool result count when > 0', () => {
+      const prompt = buildClassifierPrompt({
+        promptText: 'continue',
+        historyText: '',
+        toolResultCount: 3,
+        wordCount: 1,
+        multiLinePrompt: false,
+      });
+      expect(prompt).toContain('3 tool result');
+    });
+
+    it('includes word count note when >= 40', () => {
+      const prompt = buildClassifierPrompt({
+        promptText: 'a'.repeat(200),
+        historyText: '',
+        toolResultCount: 0,
+        wordCount: 40,
+        multiLinePrompt: false,
+      });
+      expect(prompt).toContain('long and detailed');
+    });
+
+    it('includes multi-line note when multiLinePrompt is true', () => {
+      const prompt = buildClassifierPrompt({
+        promptText: 'line1\nline2\nline3\nline4',
+        historyText: '',
+        toolResultCount: 0,
+        wordCount: 4,
+        multiLinePrompt: true,
+      });
+      expect(prompt).toContain('multiple lines');
+    });
+
+    it('returns exactly three output lines instruction', () => {
+      const prompt = buildClassifierPrompt({
+        promptText: 'test',
+        historyText: '',
+        toolResultCount: 0,
+        wordCount: 1,
+        multiLinePrompt: false,
+      });
+      expect(prompt).toContain('Tier: [high|medium|low]');
+      expect(prompt).toContain('Confidence: [high|medium|low]');
+      expect(prompt).toContain('Reasoning: [one short sentence]');
     });
   });
 });

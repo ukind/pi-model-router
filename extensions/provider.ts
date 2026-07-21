@@ -301,14 +301,14 @@ export const registerRouterProvider = (
             state.currentConfig.maxSessionBudget !== undefined &&
             state.accumulatedCost >= state.currentConfig.maxSessionBudget;
 
-          // Pre-decision: gate classifier on no pin AND no rule match
+          // Pre-decision: gate classifier on no pin (always run when configured)
           const prompt = getLastUserText(context).toLowerCase();
           const ruleHit = !pinnedTier
             ? matchHighestTierRule(prompt, state.currentConfig.rules)
             : undefined;
 
           let classifierResult: ClassifierResult | undefined;
-          if (!pinnedTier && !ruleHit && state.currentConfig.classifierModel) {
+          if (!pinnedTier && state.currentConfig.classifierModel) {
             const classifierRefs = [
               state.currentConfig.classifierModel.model,
               ...(state.currentConfig.classifierModel.fallbacks ?? []),

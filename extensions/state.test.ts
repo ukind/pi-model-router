@@ -176,6 +176,7 @@ describe('state.ts', () => {
         decision,
         'openai/gpt-4o',
         0.0045,
+        [],
       );
 
       expect(state.enabled).toBe(true);
@@ -204,6 +205,7 @@ describe('state.ts', () => {
         undefined,
         undefined,
         0,
+        [],
       );
       expect(state.selectedProfile).toBe('');
       expect(state.pinTier).toBeUndefined();

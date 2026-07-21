@@ -22,6 +22,8 @@ export const getDecisionFlags = (decision: RoutingDecision): string[] => {
   if (decision.isClassifier) flags.push('classifier');
   if (decision.isVetoed) flags.push('vetoed');
   if (decision.isPinned) flags.push('pin');
+  if (decision.classifierAttempted && !decision.isClassifier)
+    flags.push('classifier-failed');
   return flags;
 };
 

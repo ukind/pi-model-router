@@ -10,6 +10,7 @@ import type {
   RouterThinkingByProfile,
   RoutingDecision,
   RouterTier,
+  ClassifierCalibrationEntry,
 } from './types';
 import {
   profileNames,
@@ -26,6 +27,7 @@ import {
   formatDecision,
   formatUnsupportedThinkingWarning,
 } from './ui';
+import { MAX_CALIBRATION_ENTRIES } from './constants';
 
 export const registerCommands = (
   pi: ExtensionAPI,
@@ -42,6 +44,7 @@ export const registerCommands = (
     widgetEnabled: boolean;
     readonly debugHistory: RoutingDecision[];
     readonly lastConfigWarnings: string[];
+    classifierCalibration: ClassifierCalibrationEntry[];
   },
   actions: {
     persistState: () => void;
@@ -433,6 +436,24 @@ export const registerCommands = (
       return;
     }
     state.pinnedTierByProfile[state.lastDecision.profile] = tier as RouterTier;
+    // Record calibration entry when fixing a classifier decision
+    if (
+      state.lastDecision.isClassifier ||
+      state.lastDecision.classifierAttempted
+    ) {
+      const entry: ClassifierCalibrationEntry = {
+        promptSummary: state.lastDecision.rawText?.slice(0, 100) ?? '',
+        classifierTier:
+          state.lastDecision.classifierTier ?? state.lastDecision.tier,
+        finalTier: tier as RouterTier,
+        userCorrection: true,
+        timestamp: Date.now(),
+      };
+      state.classifierCalibration = [
+        ...state.classifierCalibration,
+        entry,
+      ].slice(-MAX_CALIBRATION_ENTRIES);
+    }
     actions.persistState();
     actions.updateStatus(ctx);
     ctx.ui.notify(

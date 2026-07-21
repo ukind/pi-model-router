@@ -3,6 +3,7 @@ import type {
   RouterThinkingByProfile,
   RoutingDecision,
   RouterPersistedState,
+  ClassifierCalibrationEntry,
 } from './types';
 import {
   isRouterTier,
@@ -47,7 +48,11 @@ const isVetoReason = (
 const isFailureReason = (
   v: unknown,
 ): v is NonNullable<RoutingDecision['failureReason']> =>
-  v === 'success' || v === 'unparseable';
+  v === 'success' ||
+  v === 'unparseable' ||
+  v === 'json-refused' ||
+  v === 'json-invalid' ||
+  v === 'infra-failure';
 
 /**
  * Per-field sanitizer for a persisted `RoutingDecision`.
@@ -127,6 +132,21 @@ export const sanitizeRoutingDecisionFields = (
   if (isFailureReason(value.failureReason)) {
     out.failureReason = value.failureReason;
   }
+  if (isOptionalBoolean(value.classifierAttempted)) {
+    out.classifierAttempted = value.classifierAttempted;
+  }
+  if (isRouterTier(value.classifierTier)) {
+    out.classifierTier = value.classifierTier;
+  }
+  if (
+    value.vetoOutcome === 'classifier-wins' ||
+    value.vetoOutcome === 'veto-wins'
+  ) {
+    out.vetoOutcome = value.vetoOutcome;
+  }
+  if (typeof value.vetoDisagreementMagnitude === 'number') {
+    out.vetoDisagreementMagnitude = value.vetoDisagreementMagnitude;
+  }
   return out;
 };
 
@@ -187,6 +207,16 @@ export const isRouterPersistedState = (
     typeof v.lastNonRouterModel !== 'string'
   )
     return false;
+  if (v.classifierCalibration !== undefined) {
+    if (!Array.isArray(v.classifierCalibration)) return false;
+    for (const entry of v.classifierCalibration) {
+      if (!isObjectRecord(entry)) return false;
+      if (typeof entry.promptSummary !== 'string') return false;
+      if (!isRouterTier(entry.classifierTier)) return false;
+      if (!isRouterTier(entry.finalTier)) return false;
+      if (typeof entry.timestamp !== 'number') return false;
+    }
+  }
   return true;
 };
 
@@ -201,6 +231,7 @@ export const buildPersistedState = (
   lastDecision: RoutingDecision | undefined,
   lastNonRouterModel: string | undefined,
   accumulatedCost: number,
+  classifierCalibration: ClassifierCalibrationEntry[],
 ): RouterPersistedState => {
   return {
     enabled: routerEnabled,
@@ -214,6 +245,7 @@ export const buildPersistedState = (
     lastDecision,
     lastNonRouterModel,
     accumulatedCost,
+    classifierCalibration,
     timestamp: Date.now(),
   };
 };

@@ -28,7 +28,24 @@ export interface ClassifierConfig {
 }
 
 export type ConfidenceLevel = 'high' | 'medium' | 'low';
-export type ClassifierFailureReason = 'success' | 'unparseable';
+export type ClassifierFailureReason =
+  | 'success'
+  | 'unparseable'
+  | 'json-refused'
+  | 'json-invalid'
+  | 'infra-failure';
+
+export interface ClassifierPromptContext {
+  promptText: string;
+  historyText: string;
+  toolResultCount: number;
+  wordCount: number;
+  multiLinePrompt: boolean;
+  currentPhase?: RouterPhase;
+  hasImage?: boolean;
+  isBudgetExceeded?: boolean;
+  phaseBias?: number;
+}
 
 export interface ClassifierResult {
   tier: RouterTier;
@@ -36,6 +53,14 @@ export interface ClassifierResult {
   reasoning: string;
   rawText: string;
   failureReason: ClassifierFailureReason;
+}
+
+export interface ClassifierCalibrationEntry {
+  promptSummary: string;
+  classifierTier: RouterTier;
+  finalTier: RouterTier;
+  userCorrection?: boolean;
+  timestamp: number;
 }
 
 export interface RoutedTierConfig {
@@ -87,6 +112,10 @@ export interface RoutingDecision {
   failureReason?: ClassifierFailureReason;
   isVetoed?: boolean;
   vetoReason?: 'explicit-hint';
+  classifierAttempted?: boolean;
+  classifierTier?: RouterTier;
+  vetoOutcome?: 'classifier-wins' | 'veto-wins';
+  vetoDisagreementMagnitude?: number;
 }
 
 export interface RouterPersistedState {
@@ -101,6 +130,7 @@ export interface RouterPersistedState {
   lastDecision?: RoutingDecision;
   lastNonRouterModel?: string;
   accumulatedCost?: number;
+  classifierCalibration?: ClassifierCalibrationEntry[];
   timestamp: number;
 }
 

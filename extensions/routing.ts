@@ -12,8 +12,9 @@ import type {
   ClassifierResult,
   ClassifierFailureReason,
   ConfidenceLevel,
+  ClassifierPromptContext,
 } from './types';
-import { parseCanonicalModelRef, isRouterTier } from './config';
+import { parseCanonicalModelRef, isRouterTier, ROUTER_TIERS } from './config';
 
 export const extractTextFromContent = (
   content: string | Message['content'],
@@ -183,6 +184,81 @@ export const buildRoutingDecision = (
   };
 };
 
+/**
+ * Build the classifier prompt string from a context-bundle object.
+ * Pure function — no I/O, no side effects.
+ */
+export const buildClassifierPrompt = (ctx: ClassifierPromptContext): string => {
+  const lines: string[] = [
+    'You are a model router classifier. Your job is to categorize the user\'s latest request into one of three tiers: "high", "medium", or "low".',
+    '',
+    'Tiers:',
+    '- high: Architecture, design, planning, tradeoff analysis, broad debugging, large refactors, codebase research.',
+    '- medium: Implementation of a known plan, multi-file edits, normal coding work, focused debugging, tests/fixes.',
+    '- low: Summaries, changelogs, formatting, quick explanations, small bounded transforms, simple read-only lookup.',
+    '',
+  ];
+
+  if (ctx.currentPhase) {
+    lines.push(`Current conversation phase: ${ctx.currentPhase}`);
+    lines.push('');
+  }
+
+  lines.push('Recent history:');
+  lines.push(ctx.historyText);
+  lines.push('');
+  lines.push('Latest user message:');
+  lines.push(ctx.promptText);
+  lines.push('');
+
+  if (ctx.hasImage) {
+    lines.push(
+      'Note: The user has attached an image. Bias toward "high" or "medium" tier as lower tiers may not support vision capabilities.',
+    );
+    lines.push('');
+  }
+
+  if (ctx.toolResultCount > 0) {
+    lines.push(
+      `Note: The conversation has ${ctx.toolResultCount} tool result(s), indicating active implementation work.`,
+    );
+    lines.push('');
+  }
+
+  if (ctx.wordCount >= 40) {
+    lines.push(
+      "Note: The user's message is long and detailed, suggesting a complex request.",
+    );
+    lines.push('');
+  }
+
+  if (ctx.multiLinePrompt) {
+    lines.push(
+      "Note: The user's message spans multiple lines, suggesting a structured or detailed request.",
+    );
+    lines.push('');
+  }
+
+  lines.push('Return your decision in exactly three lines:');
+  lines.push('Tier: [high|medium|low]');
+  lines.push('Confidence: [high|medium|low]');
+  lines.push('Reasoning: [one short sentence]');
+  lines.push('');
+
+  if (ctx.currentPhase === 'planning') {
+    lines.push(
+      'Consider that the conversation is currently in a planning phase. Bias toward "high" unless the request is clearly a simple implementation or summary.',
+    );
+  }
+  if (ctx.currentPhase === 'implementation') {
+    lines.push(
+      'Consider that the conversation is currently in an implementation phase. Bias toward "medium" unless the request is clearly planning or a simple summary.',
+    );
+  }
+
+  return lines.join('\n');
+};
+
 export const matchHighestTierRule = (
   prompt: string,
   rules: RoutingRule[] | undefined,
@@ -317,6 +393,10 @@ export const decideRouting = (
   let isVetoed = false;
   let isPinned = false;
   let vetoReason: 'explicit-hint' | undefined;
+  let classifierAttempted = false;
+  let classifierTier: RouterTier | undefined;
+  let vetoOutcome: 'classifier-wins' | 'veto-wins' | undefined;
+  let vetoDisagreementMagnitude: number | undefined;
 
   if (pinnedTier) {
     phase = phaseForTier(pinnedTier);
@@ -325,34 +405,92 @@ export const decideRouting = (
     isPinned = true;
   } else {
     const ruleMatch = ruleHit ?? matchHighestTierRule(prompt, rules);
-    if (ruleMatch) {
+    if (ruleMatch && classifierResult) {
+      // Rule + classifier both present: merge logic
+      // Prefer higher tier when classifier confidence is 'high'
+      // Trust the rule when classifier confidence is 'low'
+      classifierAttempted = true;
+      classifierTier = classifierResult.tier;
+      const tierRank: Record<RouterTier, number> = {
+        low: 1,
+        medium: 2,
+        high: 3,
+      };
+      if (
+        classifierResult.confidence === 'high' &&
+        tierRank[classifierResult.tier] > tierRank[ruleMatch.tier]
+      ) {
+        isClassifier = true;
+        tier = classifierResult.tier;
+        phase = previousDecision?.phase ?? phaseForTier(tier);
+        reasoning = `Classifier: ${classifierResult.reasoning} (merged: classifier high-confidence preferred over rule)`;
+        vetoOutcome = 'classifier-wins';
+      } else {
+        tier = ruleMatch.tier;
+        phase = phaseForTier(tier);
+        reasoning = ruleMatch.reasoning;
+        isRuleMatched = true;
+        // vetoOutcome left undefined — rule won, no veto occurred
+      }
+    } else if (ruleMatch) {
       tier = ruleMatch.tier;
       phase = phaseForTier(tier);
       reasoning = ruleMatch.reasoning;
       isRuleMatched = true;
     } else if (classifierResult) {
-      isClassifier = true;
-      let candidateTier = classifierResult.tier;
-      // Veto: explicit hints override classifier (Decision 1)
-      const promptHasHighHint = containsAnyWord(prompt, explicitHighHints);
-      const promptHasLowHint = containsAnyWord(prompt, explicitLowHints);
-      if (promptHasHighHint && candidateTier !== 'high') {
-        candidateTier = 'high';
-        isVetoed = true;
-        vetoReason = 'explicit-hint';
-      } else if (promptHasLowHint && candidateTier !== 'low') {
-        candidateTier = 'low';
-        isVetoed = true;
-        vetoReason = 'explicit-hint';
+      classifierAttempted = true;
+      classifierTier = classifierResult.tier;
+
+      // Low confidence: degrade to heuristic branch
+      if (classifierResult.confidence === 'low') {
+        // Fall through to heuristic branch below
+        // classifierAttempted = true for provenance
+        // isClassifier stays false — heuristic branch runs
+      } else {
+        isClassifier = true;
+        let candidateTier = classifierResult.tier;
+
+        // Confidence-aware veto: only override when confidence !== 'high'
+        const promptHasHighHint = containsAnyWord(prompt, explicitHighHints);
+        const promptHasLowHint = containsAnyWord(prompt, explicitLowHints);
+        if (
+          promptHasHighHint &&
+          candidateTier !== 'high' &&
+          classifierResult.confidence !== 'high'
+        ) {
+          candidateTier = 'high';
+          isVetoed = true;
+          vetoReason = 'explicit-hint';
+        } else if (
+          promptHasLowHint &&
+          candidateTier !== 'low' &&
+          classifierResult.confidence !== 'high'
+        ) {
+          candidateTier = 'low';
+          isVetoed = true;
+          vetoReason = 'explicit-hint';
+        }
+
+        tier = candidateTier;
+        phase = previousDecision?.phase ?? phaseForTier(tier);
+        reasoning = isVetoed
+          ? `Classifier: ${classifierResult.reasoning} (vetoed: explicit-hint forced ${tier})`
+          : `Classifier: ${classifierResult.reasoning}`;
+
+        if (isVetoed) {
+          vetoOutcome = 'veto-wins';
+          vetoDisagreementMagnitude = Math.abs(
+            ROUTER_TIERS.indexOf(classifierResult.tier) -
+              ROUTER_TIERS.indexOf(candidateTier),
+          );
+        } else {
+          vetoOutcome = 'classifier-wins';
+        }
       }
-      tier = candidateTier;
-      // Phase decoupling (Decision 6): preserve currentPhase, don't force-remap via phaseForTier
-      phase = previousDecision?.phase ?? phaseForTier(tier);
-      reasoning = isVetoed
-        ? `Classifier: ${classifierResult.reasoning} (vetoed: explicit-hint forced ${tier})`
-        : `Classifier: ${classifierResult.reasoning}`;
-    } else {
-      // Sticky phase adjustments
+    }
+
+    if (!isClassifier && !ruleMatch && !pinnedTier) {
+      // Heuristic branch (also reached on low-confidence degrade)
       const highThreshold = Math.max(
         40,
         120 - (previousDecision?.phase === 'planning' ? phaseBias * 80 : 0),
@@ -472,8 +610,18 @@ export const decideRouting = (
   decision.isRuleMatched = isRuleMatched;
   decision.isPinned = isPinned;
   decision.isBudgetForced = isBudgetForced;
+  decision.classifierAttempted = classifierAttempted;
+  if (classifierTier) {
+    decision.classifierTier = classifierTier;
+  }
+  if (vetoOutcome) {
+    decision.vetoOutcome = vetoOutcome;
+  }
+  if (vetoDisagreementMagnitude !== undefined) {
+    decision.vetoDisagreementMagnitude = vetoDisagreementMagnitude;
+  }
   // Thread classifier provenance when classifier was the source
-  if (isClassifier && classifierResult) {
+  if (classifierResult) {
     decision.confidence = classifierResult.confidence;
     decision.rawText = classifierResult.rawText;
     decision.failureReason = classifierResult.failureReason;
@@ -567,30 +715,21 @@ export const runClassifier = async (
       const headers = auth.headers;
 
       const promptText = getLastUserText(context);
-      const historyText = getRecentConversationText(context, 4);
+      const historyText = getRecentConversationText(context, 6);
+      const toolResultCount = countToolResults(context);
+      const wordCount = countWords(promptText);
+      const multiLinePrompt = promptText.split('\n').length >= 4;
 
-      const classifierPrompt = `You are a model router classifier. Your job is to categorize the user's latest request into one of three tiers: "high", "medium", or "low".
-
-Tiers:
-- high: Architecture, design, planning, tradeoff analysis, broad debugging, large refactors, codebase research.
-- medium: Implementation of a known plan, multi-file edits, normal coding work, focused debugging, tests/fixes.
-- low: Summaries, changelogs, formatting, quick explanations, small bounded transforms, simple read-only lookup.
-
-${currentPhase ? `Current conversation phase: ${currentPhase}\n` : ''}
-Recent history:
-${historyText}
-
-Latest user message:
-${promptText}
-${hasImage ? '\nNote: The user has attached an image. Bias toward "high" or "medium" tier as lower tiers may not support vision capabilities.' : ''}
-
-Return your decision in exactly three lines:
-Tier: [high|medium|low]
-Confidence: [high|medium|low]
-Reasoning: [one short sentence]
-
-${currentPhase === 'planning' ? 'Consider that the conversation is currently in a planning phase. Bias toward "high" unless the request is clearly a simple implementation or summary.' : ''}
-${currentPhase === 'implementation' ? 'Consider that the conversation is currently in an implementation phase. Bias toward "medium" unless the request is clearly planning or a simple summary.' : ''}`;
+      const classifierCtx: ClassifierPromptContext = {
+        promptText,
+        historyText,
+        toolResultCount,
+        wordCount,
+        multiLinePrompt,
+        currentPhase,
+        hasImage,
+      };
+      const classifierPrompt = buildClassifierPrompt(classifierCtx);
 
       const classifierContext: Context = {
         ...context,

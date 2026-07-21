@@ -11,6 +11,7 @@ import type {
   RouterThinkingByProfile,
   RouterTier,
   CustomSessionEntry,
+  ClassifierCalibrationEntry,
 } from './types';
 import {
   loadRouterConfig,
@@ -20,7 +21,7 @@ import {
   ROUTER_TIERS,
   getUnsupportedTiers,
 } from './config';
-import { MAX_DEBUG_HISTORY } from './constants';
+import { MAX_DEBUG_HISTORY, MAX_CALIBRATION_ENTRIES } from './constants';
 import {
   isRouterPersistedState,
   sanitizeRoutingDecisionFields,
@@ -49,6 +50,7 @@ const routerExtension = (pi: ExtensionAPI) => {
   let debugHistory: RoutingDecision[] = [];
   let lastNonRouterModel: string | undefined;
   let accumulatedCost = 0;
+  let classifierCalibration: ClassifierCalibrationEntry[] = [];
   let lastExtensionContext: ExtensionContext | undefined;
   let lastConfigWarnings: string[] = [];
   let lastPersistedSnapshot: string | undefined;
@@ -141,6 +143,7 @@ const routerExtension = (pi: ExtensionAPI) => {
       lastDecision,
       lastNonRouterModel,
       accumulatedCost,
+      classifierCalibration,
     );
     const snapshot = JSON.stringify({
       ...state,
@@ -150,6 +153,10 @@ const routerExtension = (pi: ExtensionAPI) => {
         : undefined,
       debugHistory: state.debugHistory?.map((decision) => ({
         ...decision,
+        timestamp: 0,
+      })),
+      classifierCalibration: state.classifierCalibration?.map((entry) => ({
+        ...entry,
         timestamp: 0,
       })),
     });
@@ -367,6 +374,9 @@ const routerExtension = (pi: ExtensionAPI) => {
         : [];
       lastNonRouterModel = savedState.lastNonRouterModel ?? lastNonRouterModel;
       accumulatedCost = savedState.accumulatedCost ?? 0;
+      classifierCalibration = savedState.classifierCalibration
+        ? [...savedState.classifierCalibration].slice(-MAX_CALIBRATION_ENTRIES)
+        : [];
       // Q2: per-field sanitize — strip invalid optional fields, keep required.
       // If required fields were bad, isRouterPersistedState already rejected
       // the state and the consumer is skipped. `savedState.lastDecision` here
@@ -452,6 +462,12 @@ const routerExtension = (pi: ExtensionAPI) => {
       },
       get debugHistory() {
         return debugHistory;
+      },
+      get classifierCalibration() {
+        return classifierCalibration;
+      },
+      set classifierCalibration(v) {
+        classifierCalibration = v;
       },
       get lastConfigWarnings() {
         return lastConfigWarnings;
