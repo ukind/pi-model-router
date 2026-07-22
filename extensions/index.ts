@@ -163,8 +163,13 @@ const routerExtension = (pi: ExtensionAPI) => {
     if (snapshot === lastPersistedSnapshot) {
       return;
     }
-    pi.appendEntry('router-state', state);
-    lastPersistedSnapshot = snapshot;
+    try {
+      pi.appendEntry('router-state', state);
+      lastPersistedSnapshot = snapshot;
+    } catch {
+      // ponytail: context stale after session replacement/reload.
+      // State persistence to dead session — no-op.
+    }
   };
 
   const actions = {
