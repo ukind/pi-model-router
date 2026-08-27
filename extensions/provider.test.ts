@@ -44,6 +44,7 @@ vi.mock('@earendil-works/pi-ai', () => ({
 
 vi.mock('@earendil-works/pi-ai/compat', () => ({
   streamSimple: vi.fn(),
+  getApiProvider: vi.fn().mockReturnValue({ streamSimple: vi.fn() }),
 }));
 
 describe('provider.ts', () => {

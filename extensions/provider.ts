@@ -8,7 +8,7 @@ import {
   type SimpleStreamOptions,
   type Message,
 } from '@earendil-works/pi-ai';
-import { streamSimple } from '@earendil-works/pi-ai/compat';
+import { streamSimple, getApiProvider } from '@earendil-works/pi-ai/compat';
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -579,18 +579,36 @@ export const registerRouterProvider = (
                 const { reasoning: _piReasoning, ...delegationOptions } =
                   options ?? {};
 
-                const delegatedStream = streamSimple(
-                  targetModel,
-                  effectiveContext,
-                  {
-                    ...delegationOptions,
-                    apiKey,
-                    headers,
-                    ...(delegatedReasoning
-                      ? { reasoning: delegatedReasoning }
-                      : {}),
-                  },
-                );
+                // Custom (non-builtin) api ids — e.g. cliproxyapi-codex-responses —
+                // have no entry in compat's api-registry; compat streamSimple throws
+                // "No API provider registered for api: ...". Delegate through pi's
+                // ModelRuntime instead: provider-aware and resolves auth itself
+                // (same path that makes direct selection work).
+                // ponytail: runtime facade shape is untyped; guard + compat fallback
+                // keeps behavior at least as good as before if pi changes internals.
+                const hasCompatApi = Boolean(getApiProvider(targetModel.api));
+                const runtimeStreamSimple = (
+                  state.currentModelRegistry as unknown as {
+                    runtime?: { streamSimple?: typeof streamSimple };
+                  }
+                )?.runtime?.streamSimple;
+
+                const delegatedStream =
+                  !hasCompatApi && runtimeStreamSimple
+                    ? runtimeStreamSimple(targetModel, effectiveContext, {
+                        ...delegationOptions,
+                        ...(delegatedReasoning
+                          ? { reasoning: delegatedReasoning }
+                          : {}),
+                      })
+                    : streamSimple(targetModel, effectiveContext, {
+                        ...delegationOptions,
+                        apiKey,
+                        headers,
+                        ...(delegatedReasoning
+                          ? { reasoning: delegatedReasoning }
+                          : {}),
+                      });
 
                 let contentReceived = false;
                 for await (const event of delegatedStream) {
