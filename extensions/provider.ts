@@ -281,13 +281,31 @@ export const registerRouterProvider = (
     ): AssistantMessageEventStream {
       const stream = createAssistantMessageEventStream();
 
+      // Invariant guard: pi emits `before_provider_request` with a fresh ctx
+      // before every provider request (the router extension re-captures there),
+      // so the registry is guaranteed set by the time streamSimple runs.
+      // If this fires, the capture contract broke — fail loudly WITHOUT
+      // persisting state (nothing meaningful exists to persist). (L1-01,
+      // L1-03.)
+      if (!state.currentModelRegistry) {
+        stream.push({
+          type: 'error',
+          reason: 'error',
+          error: createErrorMessage(
+            model,
+            'Router provider has no model registry: no ctx was captured before this stream. This is a router extension bug — please report it.',
+          ),
+        });
+        stream.end();
+        return stream;
+      }
+
       (async () => {
         try {
-          if (!state.currentModelRegistry) {
-            throw new Error(
-              'Router provider not initialized yet. Wait for session_start and retry.',
-            );
-          }
+          // The hoisted invariant guard above guarantees the registry is live
+          // here; the getter's type remains `| undefined`, so snapshot it once
+          // for the narrowing that the in-IIFE guard previously provided.
+          const modelRegistry = state.currentModelRegistry!;
           const profile = state.currentConfig.profiles[model.id];
           if (!profile) {
             throw new Error(`Unknown router profile: ${model.id}`);
@@ -315,7 +333,7 @@ export const registerRouterProvider = (
             ];
             classifierResult = await runClassifier(
               classifierRefs,
-              state.currentModelRegistry,
+              modelRegistry,
               context,
               state.lastDecision?.phase,
               state.currentConfig.classifierModel.thinking,
@@ -515,7 +533,7 @@ export const registerRouterProvider = (
                 continue;
               }
 
-              const targetModel = state.currentModelRegistry.find(
+              const targetModel = modelRegistry.find(
                 targetProvider,
                 targetModelId,
               );
@@ -527,7 +545,7 @@ export const registerRouterProvider = (
               }
 
               const auth =
-                await state.currentModelRegistry.getApiKeyAndHeaders(
+                await modelRegistry.getApiKeyAndHeaders(
                   targetModel,
                 );
               if (!auth.ok || !auth.apiKey) {

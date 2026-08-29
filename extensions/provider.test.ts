@@ -806,8 +806,10 @@ describe('provider.ts', () => {
 
       const errorEvent = stream.events.find((e: any) => e.type === 'error');
       expect(errorEvent).toBeDefined();
-      expect(errorEvent.error.errorMessage).toContain('not initialized yet');
-      expect(mockActions.persistState).toHaveBeenCalled();
+      expect(errorEvent.error.errorMessage).toContain('no model registry');
+      // Guard fires before any state exists — nothing meaningful to persist
+      // (L1-03: no garbage router-state entry on the failure path).
+      expect(mockActions.persistState).not.toHaveBeenCalled();
     });
 
     it('should push error event when profile is unknown', async () => {

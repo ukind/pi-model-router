@@ -106,6 +106,45 @@ describe('index.ts (orchestrator)', () => {
     expect(mockPi.on).toHaveBeenCalledWith('turn_end', expect.any(Function));
   });
 
+  it('should wire before_provider_request capture that survives stale ctx', async () => {
+    routerExtension(mockPi);
+
+    // The capture contract: a before_provider_request handler must exist and
+    // run before every provider request, independent of session_start (L0-01).
+    const captureHandlers = eventListeners['before_provider_request'] || [];
+    expect(captureHandlers.length).toBeGreaterThan(0);
+
+    // Fresh ctx (as pi delivers before every stream) must capture cleanly.
+    const mockCtx = buildMockCtx();
+    for (const handler of captureHandlers) {
+      await handler({}, mockCtx);
+    }
+
+    // Stale ctx after session replacement throws from ctx getters; the
+    // capture must swallow the throw and keep the last captured registry
+    // instead of aborting the event pipeline.
+    const staleCtx = {
+      get modelRegistry() {
+        throw new Error('This extension ctx is stale after session replacement');
+      },
+      get cwd() {
+        throw new Error('This extension ctx is stale after session replacement');
+      },
+    };
+    for (const handler of captureHandlers) {
+      // Sync handler returns undefined; the assertion is that it does not
+      // throw despite the stale ctx.
+      handler({}, staleCtx);
+    }
+
+    // Rest of the lifecycle still works after stale-ctx captures: a full
+    // session_start with a fresh ctx completes without throwing.
+    const sessionStartHandlers = eventListeners['session_start'] || [];
+    for (const handler of sessionStartHandlers) {
+      await handler({}, mockCtx);
+    }
+  });
+
   it('should restore state from session on session_start hook', async () => {
     routerExtension(mockPi);
 

@@ -58,6 +58,25 @@ const routerExtension = (pi: ExtensionAPI) => {
   let isInternalModelSwitch = false;
   let isInternalThinkingChange = false;
 
+  // Refresh the long-lived runtime captures (registry, cwd, last ctx) from
+  // the delivered ExtensionContext. A delivered ctx goes stale after any
+  // session replacement (pi invalidates captured runners on newSession /
+  // fork / switchSession / reload), so this must run on EVERY event, above
+  // any behavioral early-return gates. `before_provider_request` is the
+  // contract anchor: pi emits it with a fresh ctx immediately before each
+  // provider request, which makes the provider's registry guard a true
+  // invariant instead of a session-start race. (Architecture review L0-01/
+  // L0-02/L0-04.)
+  const captureCtx = (ctx: ExtensionContext) => {
+    try {
+      lastExtensionContext = ctx;
+      currentModelRegistry = ctx.modelRegistry;
+      currentCwd = ctx.cwd;
+    } catch {
+      // Stale ctx after session replacement — ctx getters throw. Keep the
+      // last captured values; the next event delivers a fresh ctx.
+    }
+  };
   const setModelInternally = async (
     model: NonNullable<ExtensionContext['model']>,
   ) => {
@@ -321,10 +340,7 @@ const routerExtension = (pi: ExtensionAPI) => {
 
   actions.reloadConfig();
 
-  const restoreStateFromSession = async (ctx: ExtensionContext) => {
-    lastExtensionContext = ctx;
-    currentModelRegistry = ctx.modelRegistry;
-    currentCwd = ctx.cwd;
+  const restoreStateFromSessionInner = async (ctx: ExtensionContext) => {
     actions.reloadConfig(ctx);
 
     routerEnabled = ctx.model?.provider === 'router';
@@ -421,6 +437,27 @@ const routerExtension = (pi: ExtensionAPI) => {
     actions.updateStatus(ctx);
   };
 
+  // Full state restore is guarded: captureCtx (invoked by every event
+  // handler above) has already secured the registry, so a failed restore
+  // must not leave the router unusable — surface it and continue.
+  // (Architecture review L0-03.)
+  const restoreStateFromSession = async (ctx: ExtensionContext) => {
+    try {
+      await restoreStateFromSessionInner(ctx);
+    } catch (error) {
+      try {
+        ctx.ui.notify(
+          `Router state restore failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          'warning',
+        );
+      } catch {
+        // stale ctx after session replacement — cannot notify
+      }
+    }
+  };
+
   registerCommands(
     pi,
     {
@@ -481,7 +518,18 @@ const routerExtension = (pi: ExtensionAPI) => {
     actions,
   );
 
+  // Capture contract anchor: pi's turn lifecycle emits
+  // before_provider_request → [provider request] with a fresh ctx in every
+  // mode (interactive/print/json/rpc), across session replacements. This
+  // guarantees streamSimple always sees a live model registry — including
+  // subagent child processes that race session_start with their first model
+  // call, and parents whose session was replaced mid-run. (L0-01.)
+  pi.on('before_provider_request', (_event, ctx) => {
+    captureCtx(ctx);
+  });
+
   pi.on('session_start', async (_event, ctx) => {
+    captureCtx(ctx);
     isInitialized = true;
     await restoreStateFromSession(ctx);
     if (debugEnabled) {
@@ -493,6 +541,7 @@ const routerExtension = (pi: ExtensionAPI) => {
   });
 
   pi.on('model_select', async (event, ctx) => {
+    captureCtx(ctx);
     if (!isInitialized || isInternalModelSwitch) return;
     if (event.model.provider === 'router') {
       const profileName = resolveProfileName(currentConfig, event.model.id);
@@ -524,6 +573,7 @@ const routerExtension = (pi: ExtensionAPI) => {
   });
 
   pi.on('turn_end', async (_event, ctx) => {
+    captureCtx(ctx);
     if (routerEnabled && selectedProfile && ctx.model?.provider !== 'router') {
       const routerModel = ctx.modelRegistry.find('router', selectedProfile);
       if (routerModel) {
@@ -535,6 +585,7 @@ const routerExtension = (pi: ExtensionAPI) => {
   });
 
   pi.on('thinking_level_select', (event, ctx) => {
+    captureCtx(ctx);
     if (!isInitialized || !routerEnabled || !selectedProfile) return;
     if (isInternalThinkingChange) return;
 
