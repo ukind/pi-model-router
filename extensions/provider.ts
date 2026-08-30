@@ -605,11 +605,15 @@ export const registerRouterProvider = (
                 // ponytail: runtime facade shape is untyped; guard + compat fallback
                 // keeps behavior at least as good as before if pi changes internals.
                 const hasCompatApi = Boolean(getApiProvider(targetModel.api));
-                const runtimeStreamSimple = (
+                const registryRuntime = (
                   state.currentModelRegistry as unknown as {
                     runtime?: { streamSimple?: typeof streamSimple };
                   }
-                )?.runtime?.streamSimple;
+                )?.runtime;
+                // ModelRuntime.streamSimple reads `this.prepareRequest`, so a
+                // detached reference throws and silently demotes the model.
+                const runtimeStreamSimple =
+                  registryRuntime?.streamSimple?.bind(registryRuntime);
 
                 const delegatedStream =
                   !hasCompatApi && runtimeStreamSimple
