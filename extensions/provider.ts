@@ -43,6 +43,12 @@ import {
   getLastUserText,
 } from './routing';
 
+// Exact pi stale-ctx message prefix (ctx getters throw with this prefix in
+// pi core). Benign classification matches it exactly; pi drift degrades to
+// the visible error path (fails loud).
+const STALE_CTX_MESSAGE_PREFIX =
+  'This extension ctx is stale after session replacement';
+
 export const createErrorMessage = (
   model: Model<Api>,
   message: string,
@@ -170,6 +176,7 @@ export const registerRouterProvider = (
       | ExtensionContext['modelRegistry']
       | undefined;
     readonly lastExtensionContext: ExtensionContext | undefined;
+    readonly isExtensionContextDead: boolean;
     selectedProfile: string | undefined;
     routerEnabled: boolean;
     lastDecision: RoutingDecision | undefined;
@@ -341,6 +348,14 @@ export const registerRouterProvider = (
             );
           }
 
+          // The classifier await can span a session replacement. Re-verify
+          // liveness before any ctx-derived read below: direct return keeps
+          // the finally-running persistState and surfaces no error event.
+          if (state.isExtensionContextDead || options?.signal?.aborted) {
+            stream.end();
+            return;
+          }
+
           let decision: RoutingDecision = decideRouting(
             context,
             model.id,
@@ -462,7 +477,7 @@ export const registerRouterProvider = (
             decision.thinking;
           actions.syncPiThinkingLevel(effectiveThinking);
 
-          if (state.lastExtensionContext) {
+          if (state.lastExtensionContext && !state.isExtensionContextDead) {
             actions.updateStatus(state.lastExtensionContext);
           }
 
@@ -524,6 +539,13 @@ export const registerRouterProvider = (
             }
 
             for (let i = 0; i < modelsToTry.length; i++) {
+              // Choke point: every tier transition and candidate retry
+              // re-enters this loop top. After a replacement kill (dead
+              // flag) or a user abort, stop the fallback chain silently.
+              if (state.isExtensionContextDead || options?.signal?.aborted) {
+                stream.end();
+                return;
+              }
               const modelRef = modelsToTry[i];
               const { provider: targetProvider, modelId: targetModelId } =
                 parseCanonicalModelRef(modelRef);
@@ -548,6 +570,13 @@ export const registerRouterProvider = (
                 await modelRegistry.getApiKeyAndHeaders(
                   targetModel,
                 );
+
+              // The auth fetch awaited — a replacement can land mid-await.
+              // Re-verify before opening the delegated stream.
+              if (state.isExtensionContextDead || options?.signal?.aborted) {
+                stream.end();
+                return;
+              }
               if (!auth.ok || !auth.apiKey) {
                 lastError = new Error(
                   auth.ok
@@ -584,7 +613,10 @@ export const registerRouterProvider = (
                         decision.thinking) as import('@earendil-works/pi-ai').ThinkingLevel)
                     : undefined;
 
-                if (state.lastExtensionContext) {
+                if (
+                  state.lastExtensionContext &&
+                  !state.isExtensionContextDead
+                ) {
                   if (delegatedReasoning) {
                     state.lastExtensionContext.ui.setHiddenThinkingLabel?.(
                       `Thinking (${targetProvider}/${targetModelId})...`,
@@ -700,7 +732,11 @@ export const registerRouterProvider = (
                     'medium';
                   decision.reasoning = `In-tier fallback to ${modelRef}. (Original: ${decision.reasoning})`;
                 }
-                if (state.lastExtensionContext && decision.isFallback) {
+                if (
+                  state.lastExtensionContext &&
+                  !state.isExtensionContextDead &&
+                  decision.isFallback
+                ) {
                   actions.updateStatus(state.lastExtensionContext);
                 }
                 break outer;
@@ -728,14 +764,25 @@ export const registerRouterProvider = (
 
           stream.end();
         } catch (error) {
-          stream.push({
-            type: 'error',
-            reason: 'error',
-            error: createErrorMessage(
-              model,
-              error instanceof Error ? error.message : String(error),
-            ),
-          });
+          // Benign termination: a session replacement killed this turn.
+          // Branch 1 — stale ctx throw: pi's exact prefix. Branch 2 —
+          // pi's abort: AbortError. Neither is a router failure, so no
+          // error event is pushed. Non-matching errors still surface.
+          const isStaleCtx =
+            error instanceof Error &&
+            error.message.startsWith(STALE_CTX_MESSAGE_PREFIX);
+          const isAborted =
+            error instanceof Error && error.name === 'AbortError';
+          if (!isStaleCtx && !isAborted) {
+            stream.push({
+              type: 'error',
+              reason: 'error',
+              error: createErrorMessage(
+                model,
+                error instanceof Error ? error.message : String(error),
+              ),
+            });
+          }
           stream.end();
         } finally {
           actions.persistState();

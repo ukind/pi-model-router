@@ -58,6 +58,11 @@ const routerExtension = (pi: ExtensionAPI) => {
   let isInternalModelSwitch = false;
   let isInternalThinkingChange = false;
 
+  // Dead-flag gate: true while the captured ExtensionContext is known dead
+  // (session_shutdown fired or a capture went stale). Cleared on the next
+  // live capture. Runtime-only — never part of RouterPersistedState.
+  let isExtensionContextDead = false;
+
   // Refresh the long-lived runtime captures (registry, cwd, last ctx) from
   // the delivered ExtensionContext. A delivered ctx goes stale after any
   // session replacement (pi invalidates captured runners on newSession /
@@ -69,12 +74,20 @@ const routerExtension = (pi: ExtensionAPI) => {
   // L0-02/L0-04.)
   const captureCtx = (ctx: ExtensionContext) => {
     try {
+      // A successful read below proves the ctx is alive — clear the flag.
+      isExtensionContextDead = false;
       lastExtensionContext = ctx;
       currentModelRegistry = ctx.modelRegistry;
       currentCwd = ctx.cwd;
     } catch {
+      isExtensionContextDead = true;
       // Stale ctx after session replacement — ctx getters throw. Keep the
       // last captured values; the next event delivers a fresh ctx.
+      // NOTE: `lastExtensionContext` may already hold the dead ctx here
+      // (assigned before the throwing getter read) while the flag is set —
+      // every reader must check `isExtensionContextDead` first.
+      // (Comment amended by plan review, Step 5 S1; code order kept verbatim
+      // from the design — reorder only via a /skill:design follow-up.)
     }
   };
   const setModelInternally = async (
@@ -116,7 +129,7 @@ const routerExtension = (pi: ExtensionAPI) => {
     // Clone before pushing — the cross-tier fallback branch mutates the live
     // `decision` reference in place.
     debugHistory = [...debugHistory, { ...decision }].slice(-MAX_DEBUG_HISTORY);
-    if (debugEnabled && lastExtensionContext) {
+    if (debugEnabled && lastExtensionContext && !isExtensionContextDead) {
       // Priority order for the notification source label;
       // `getDecisionFlags` (ui.ts) accumulates all applicable flags into an
       // array for the widget — it is not a priority selector. The two
@@ -272,13 +285,17 @@ const routerExtension = (pi: ExtensionAPI) => {
       }
       const success = await setModelInternally(routerModel);
       if (!success) {
-        ctx.ui.notify(`Failed to switch to router/${profileName}`, 'error');
+        if (!isExtensionContextDead) {
+          ctx.ui.notify(`Failed to switch to router/${profileName}`, 'error');
+        }
         return false;
       }
       selectedProfile = profileName;
       routerEnabled = true;
       persistState();
-      actions.updateStatus(ctx);
+      if (!isExtensionContextDead) {
+        actions.updateStatus(ctx);
+      }
       return true;
     },
     registerRouterProvider: () => {
@@ -299,6 +316,9 @@ const routerExtension = (pi: ExtensionAPI) => {
           },
           get lastExtensionContext() {
             return lastExtensionContext;
+          },
+          get isExtensionContextDead() {
+            return isExtensionContextDead;
           },
           get selectedProfile() {
             return selectedProfile;
@@ -528,11 +548,20 @@ const routerExtension = (pi: ExtensionAPI) => {
     captureCtx(ctx);
   });
 
+  // Death anchor: pi emits `session_shutdown` and awaits every handler
+  // BEFORE it invalidates the ctx (pi core/agent-session-runtime.js
+  // teardownCurrent). Flip the flag here so in-flight turns gate ctx reads
+  // before the ctx dies. Pi skips the emit when no handler is registered —
+  // registering here activates the path.
+  pi.on('session_shutdown', () => {
+    isExtensionContextDead = true;
+  });
+
   pi.on('session_start', async (_event, ctx) => {
     captureCtx(ctx);
     isInitialized = true;
     await restoreStateFromSession(ctx);
-    if (debugEnabled) {
+    if (debugEnabled && !isExtensionContextDead) {
       ctx.ui.notify(
         `Router initialized with profiles: ${profileNames(currentConfig).join(', ')}`,
         'info',
@@ -566,10 +595,14 @@ const routerExtension = (pi: ExtensionAPI) => {
     } else {
       routerEnabled = false;
       lastNonRouterModel = `${event.model.provider}/${event.model.id}`;
-      ctx.ui.setHiddenThinkingLabel?.();
+      if (!isExtensionContextDead) {
+        ctx.ui.setHiddenThinkingLabel?.();
+      }
     }
     persistState();
-    actions.updateStatus(ctx);
+    if (!isExtensionContextDead) {
+      actions.updateStatus(ctx);
+    }
   });
 
   pi.on('turn_end', async (_event, ctx) => {
@@ -581,7 +614,9 @@ const routerExtension = (pi: ExtensionAPI) => {
       }
     }
     persistState();
-    actions.updateStatus(ctx);
+    if (!isExtensionContextDead) {
+      actions.updateStatus(ctx);
+    }
   });
 
   pi.on('thinking_level_select', (event, ctx) => {

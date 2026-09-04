@@ -102,6 +102,7 @@ describe('provider.ts', () => {
           setHiddenThinkingLabel: vi.fn(),
         },
       },
+      isExtensionContextDead: false,
       selectedProfile: undefined,
       routerEnabled: false,
       lastDecision: undefined,
@@ -997,5 +998,303 @@ describe('provider.ts', () => {
       // All-skip path never attempts a real model call.
       expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
     });
+
+  describe('session replacement gates (dead flag / abort)', () => {
+    const sleep = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
+
+    const makeModel = () =>
+      ({ id: 'balanced', api: 'router-api', provider: 'router' }) as any;
+    const makeContext = () =>
+      ({ messages: [{ role: 'user', content: 'hello' }] }) as any;
+
+    it('should end a mid-turn replacement silently and stop fallback retries', async () => {
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      // Deferred gate (the suite's one new construct): the delegated stream
+      // blocks mid-stream until the test simulates the replacement kill.
+      let releaseDelegated = () => {};
+      const midStreamGate = new Promise<void>((resolve) => {
+        releaseDelegated = resolve;
+      });
+
+      const attempts: string[] = [];
+      vi.mocked(streamSimple).mockImplementation(((model: any) => {
+        attempts.push(model.id);
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'partial' };
+          await midStreamGate;
+          // pi aborts the underlying provider stream on session replacement.
+          const abortError = new Error('The operation was aborted');
+          abortError.name = 'AbortError';
+          throw abortError;
+        })() as any;
+      }) as any);
+
+      // Pin medium: [gpt-4o-mini, gemini-1.5-flash] — the retry that must
+      // NOT happen after the kill.
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(50);
+      expect(attempts).toEqual(['gpt-4o-mini']);
+
+      // Session replacement: session_shutdown fired (flag set, Slice 1) and
+      // the underlying stream aborted.
+      mockState.isExtensionContextDead = true;
+      releaseDelegated();
+      await sleep(100);
+
+      // Silent end: no error event, no fallback retry, state persisted.
+      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      expect(attempts).toEqual(['gpt-4o-mini']);
+      expect(mockActions.persistState).toHaveBeenCalled();
+    });
+
+    it('should stop candidate retries when only the abort signal fires', async () => {
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      const controller = new AbortController();
+      let releaseDelegated = () => {};
+      const midStreamGate = new Promise<void>((resolve) => {
+        releaseDelegated = resolve;
+      });
+
+      const attempts: string[] = [];
+      vi.mocked(streamSimple).mockImplementation(((model: any) => {
+        attempts.push(model.id);
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'partial' };
+          await midStreamGate;
+          const abortError = new Error('The operation was aborted');
+          abortError.name = 'AbortError';
+          throw abortError;
+        })() as any;
+      }) as any);
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      // Dead flag stays false: only the signal proves the choke's second
+      // branch (user stop, not replacement).
+      registeredProviderOptions.streamSimple(makeModel(), makeContext(), {
+        signal: controller.signal,
+      } as any);
+      await sleep(50);
+
+      controller.abort();
+      releaseDelegated();
+      await sleep(100);
+
+      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      expect(attempts).toEqual(['gpt-4o-mini']);
+      expect(mockActions.persistState).toHaveBeenCalled();
+    });
+
+    it('should exit silently when the session dies during the auth await', async () => {
+      let releaseAuth = () => {};
+      const authGate = new Promise<void>((resolve) => {
+        releaseAuth = resolve;
+      });
+      mockState.currentModelRegistry.getApiKeyAndHeaders = async () => {
+        await authGate;
+        return { ok: true, apiKey: 'key', headers: {} };
+      };
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      vi.mocked(streamSimple).mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'never reached' };
+        })() as any,
+      );
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(50);
+
+      // Replacement lands while the auth fetch is in flight.
+      mockState.isExtensionContextDead = true;
+      releaseAuth();
+      await sleep(100);
+
+      // Post-auth gate fired: no delegated stream opened, silent end.
+      expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
+      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      expect(mockActions.persistState).toHaveBeenCalled();
+    });
+
+    it('should classify a stale-ctx throw as benign: no error event, still persists', async () => {
+      // A pi-backed action throws pi's exact stale message mid-IIFE.
+      mockActions.syncPiThinkingLevel = vi.fn(() => {
+        throw new Error(
+          'This extension ctx is stale after session replacement',
+        );
+      });
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(100);
+
+      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
+      expect(mockActions.persistState).toHaveBeenCalled();
+    });
+
+    it('should still surface a non-matching live error (negative control)', async () => {
+      // Same throw site, wrong message: the classification must not mask a
+      // live candidate failure (cdcfe2eb lesson).
+      mockActions.syncPiThinkingLevel = vi.fn(() => {
+        throw new Error('API key revoked');
+      });
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(100);
+
+      const errorEvent = stream.events.find((e: any) => e.type === 'error');
+      expect(errorEvent).toBeDefined();
+      expect(errorEvent.error.errorMessage).toContain('API key revoked');
+      expect(mockActions.persistState).toHaveBeenCalled();
+    });
+
+    it('should keep gated ctx reads and still record the decision when a killed stream completes (reload case)', async () => {
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      let releaseDelegated = () => {};
+      const midStreamGate = new Promise<void>((resolve) => {
+        releaseDelegated = resolve;
+      });
+
+      vi.mocked(streamSimple).mockImplementation(((model: any) => {
+        if (model.id === 'gpt-4o-mini') {
+          // Primary fails normally (pre-kill) — the in-tier fallback opens.
+          return (async function* () {
+            throw new Error('primary failed');
+          })() as any;
+        }
+        return (async function* () {
+          // Fallback streams past the kill: on reload the delegated stream
+          // runs to completion with the flag already set.
+          yield { type: 'text_delta', delta: 'fallback answer' };
+          await midStreamGate;
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.0005 } } },
+          };
+        })() as any;
+      }) as any);
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(50);
+
+      // Replacement fires mid-stream; the running stream completes anyway.
+      mockState.isExtensionContextDead = true;
+      releaseDelegated();
+      await sleep(100);
+
+      // Silent, decision recorded, ctx-derived status update gated.
+      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      expect(mockActions.recordDebugDecision).toHaveBeenCalledTimes(1);
+      expect(mockActions.updateStatus).toHaveBeenCalledTimes(1); // pre-loop only
+      expect(mockState.lastDecision.isFallback).toBe(true);
+      expect(mockActions.persistState).toHaveBeenCalled();
+    });
+
+    it('should exit silently when the session dies during the classifier await', async () => {
+      // No pin + a configured classifier: the classifier call flows through
+      // the mocked compat streamSimple (routing.ts:746) — the same
+      // deferred-gate construct, no new mock surface.
+      mockState.currentConfig.classifierModel = {
+        model: 'openai/gpt-4o-mini',
+        thinking: 'low',
+      };
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      let releaseClassifier = () => {};
+      const classifierGate = new Promise<void>((resolve) => {
+        releaseClassifier = resolve;
+      });
+
+      const attempts: string[] = [];
+      vi.mocked(streamSimple).mockImplementation(((model: any) => {
+        attempts.push(model.id);
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'medium' };
+          await classifierGate;
+          yield { type: 'text_delta', delta: 'medium' };
+        })() as any;
+      }) as any);
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(50);
+      expect(attempts).toEqual(['gpt-4o-mini']); // classifier call in flight
+
+      // Replacement lands mid-classifier.
+      mockState.isExtensionContextDead = true;
+      releaseClassifier();
+      await sleep(100);
+
+      // Post-classifier gate fired: silent end, no delegated stream opened.
+      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      expect(attempts).toEqual(['gpt-4o-mini']);
+      expect(mockActions.persistState).toHaveBeenCalled();
+    });
+
+    it('should classify pi abort (AbortError) as benign: no error event', async () => {
+      // AbortError thrown straight into the IIFE catch (not swallowed by
+      // the per-candidate catch) — proves the catch's second branch.
+      mockActions.syncPiThinkingLevel = vi.fn(() => {
+        const abortError = new Error('The operation was aborted');
+        abortError.name = 'AbortError';
+        throw abortError;
+      });
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(100);
+
+      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
+      expect(mockActions.persistState).toHaveBeenCalled();
+    });
+  });
   });
 });

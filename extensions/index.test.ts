@@ -145,6 +145,260 @@ describe('index.ts (orchestrator)', () => {
     }
   });
 
+  describe('session_shutdown dead-flag gate (flag core)', () => {
+    it('should register a session_shutdown handler', () => {
+      routerExtension(mockPi);
+      expect(mockPi.on).toHaveBeenCalledWith(
+        'session_shutdown',
+        expect.any(Function),
+      );
+    });
+
+    it('should survive shutdown + stale captures and recover on the next live event', async () => {
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+
+      // session_shutdown fires before ctx invalidation — the handler must
+      // not touch ctx (flag-only), so it cannot throw.
+      const shutdownHandlers = eventListeners['session_shutdown'] || [];
+      for (const handler of shutdownHandlers) {
+        handler({}, mockCtx);
+      }
+
+      // A stale delivered ctx sets the flag via the captureCtx catch; the
+      // swallow contract (index.test.ts:126-133) still holds.
+      const staleCtx = {
+        get modelRegistry() {
+          throw new Error(
+            'This extension ctx is stale after session replacement',
+          );
+        },
+        get cwd() {
+          throw new Error(
+            'This extension ctx is stale after session replacement',
+          );
+        },
+      };
+      const captureHandlers = eventListeners['before_provider_request'] || [];
+      for (const handler of captureHandlers) {
+        handler({}, staleCtx);
+      }
+
+      // Recovery: the next live event (session_start with a fresh ctx)
+      // completes a full restore — the flag cleared via live capture and
+      // the extension stays fully functional.
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+      expect(mockCtx.ui.setStatus).toHaveBeenCalled();
+    });
+  });
+
+  describe('session_shutdown dead-flag gate (handler tails)', () => {
+    const STALE_MESSAGE =
+      'This extension ctx is stale after session replacement';
+
+    const fireShutdown = () => {
+      for (const handler of eventListeners['session_shutdown'] || []) {
+        handler();
+      }
+    };
+
+    it('should skip ctx reads in the switchToRouterProfile tail when the session dies during the model switch', async () => {
+      routerExtension(mockPi);
+
+      // Entry: the real /router command handler → handleProfile →
+      // actions.switchToRouterProfile (commands.ts:222).
+      const routerCommand = mockPi.registerCommand.mock.calls[0][1];
+      const mockCtx = buildMockCtx();
+
+      // Death lands during `await setModelInternally` (index.ts:273).
+      mockPi.setModel = vi.fn(async () => {
+        fireShutdown();
+        return true;
+      });
+
+      await routerCommand.handler('profile balanced', mockCtx);
+
+      // Tail ran past the gates: persist happened, but the ctx-derived
+      // status update was skipped (index.ts:281 gate).
+      expect(mockPi.appendEntry).toHaveBeenCalled();
+      expect(mockCtx.ui.setStatus).not.toHaveBeenCalled();
+      expect(mockCtx.ui.notify).toHaveBeenCalledWith(
+        'Switched to router profile: balanced',
+        'info',
+      );
+    });
+
+    it('should skip the failure notify when the session dies during a failed model switch', async () => {
+      routerExtension(mockPi);
+
+      const routerCommand = mockPi.registerCommand.mock.calls[0][1];
+      const mockCtx = buildMockCtx();
+
+      // Death lands mid-switch AND the switch fails → the :275 gate must
+      // skip the error notify; the command surfaces nothing either.
+      mockPi.setModel = vi.fn(async () => {
+        fireShutdown();
+        return false;
+      });
+
+      await routerCommand.handler('profile balanced', mockCtx);
+
+      // switchToRouterProfile returned false; handleProfile's success
+      // notify did not fire; the router's own failure notify was gated.
+      expect(mockCtx.ui.notify).not.toHaveBeenCalled();
+      expect(mockCtx.ui.setStatus).not.toHaveBeenCalled();
+    });
+
+    it('should skip the session_start debug notify when the session dies during restore', async () => {
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+      mockCtx.sessionManager.getBranch = () => {
+        // Death lands mid-restore (index.ts:534).
+        fireShutdown();
+        return [
+          {
+            type: 'custom',
+            customType: 'router-state',
+            data: {
+              enabled: true,
+              selectedProfile: 'balanced',
+              pinByProfile: {},
+              thinkingByProfile: {},
+              debugEnabled: true,
+              timestamp: Date.now(),
+            },
+          },
+        ];
+      };
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      // Restore completed (mock ctx stays live) but the debug notify at
+      // index.ts:535-540 was gated — no 'Router initialized' toast.
+      expect(mockCtx.ui.notify).not.toHaveBeenCalledWith(
+        expect.stringContaining('Router initialized'),
+        'info',
+      );
+    });
+
+    it('should survive a stale delivered ctx in the model_select tail and still persist', async () => {
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+      mockCtx.ui.setStatus.mockClear();
+
+      // Delivered-dead ctx: every getter throws (real dead-ctx shape —
+      // pi runner.js ctx getters all throw after invalidation).
+      const staleCtx = {
+        get modelRegistry() {
+          throw new Error(STALE_MESSAGE);
+        },
+        get cwd() {
+          throw new Error(STALE_MESSAGE);
+        },
+        get ui() {
+          throw new Error(STALE_MESSAGE);
+        },
+      };
+
+      const modelSelectHandlers = eventListeners['model_select'] || [];
+      for (const handler of modelSelectHandlers) {
+        // Without the :569/:572 gates this rejects (ui getter throws);
+        // with them the handler completes and still persists.
+        await handler(
+          { model: { provider: 'anthropic', id: 'claude-3-5-sonnet' } },
+          staleCtx,
+        );
+      }
+
+      expect(mockPi.appendEntry).toHaveBeenCalledWith(
+        'router-state',
+        expect.objectContaining({
+          enabled: false,
+          lastNonRouterModel: 'anthropic/claude-3-5-sonnet',
+        }),
+      );
+    });
+
+    it('should skip the model_select status update when the session dies during the capacity refresh', async () => {
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+      mockCtx.ui.setStatus.mockClear();
+
+      // Event model carries capacities that differ from the registry model
+      // (undefined) → the capacity-refresh await at index.ts:561 runs.
+      mockPi.setModel = vi.fn(async () => {
+        fireShutdown();
+        return true;
+      });
+
+      const modelSelectHandlers = eventListeners['model_select'] || [];
+      for (const handler of modelSelectHandlers) {
+        await handler(
+          {
+            model: {
+              provider: 'router',
+              id: 'balanced',
+              contextWindow: 999999,
+              maxTokens: 9999,
+            },
+          },
+          mockCtx,
+        );
+      }
+
+      // Router branch completed (state already matched → persist may
+      // dedupe), but the :572 gate skipped the status update.
+      expect(mockCtx.ui.setStatus).not.toHaveBeenCalled();
+    });
+
+    it('should skip the turn_end status update when the session dies during the model restore', async () => {
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      // routerEnabled=true + non-router active model → turn_end restores
+      // via `await setModelInternally` (index.ts:580).
+      mockCtx.model = { provider: 'openai', id: 'gpt-4o' };
+      mockCtx.ui.setStatus.mockClear();
+
+      mockPi.setModel = vi.fn(async () => {
+        fireShutdown();
+        return true;
+      });
+
+      const turnEndHandlers = eventListeners['turn_end'] || [];
+      for (const handler of turnEndHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      // persistState ran (snapshot may dedupe — enabled state unchanged);
+      // the ctx-derived status update at index.ts:584 was skipped.
+      expect(mockCtx.ui.setStatus).not.toHaveBeenCalled();
+    });
+  });
+
   it('should restore state from session on session_start hook', async () => {
     routerExtension(mockPi);
 
