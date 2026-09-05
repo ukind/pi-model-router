@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { registerRouterProvider, createErrorMessage } from './provider';
+import { registerRouterProvider, createErrorMessage, createAbortedMessage } from './provider';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
 import type { RouterConfig, RoutingDecision } from './types';
@@ -7,9 +7,21 @@ import type { RouterConfig, RoutingDecision } from './types';
 class MockEventStream {
   events: any[] = [];
   onCallbacks: Record<string, Function[]> = {};
+  // Mirror of pi-ai EventStream.result() (event-stream.js:17-36): resolves
+  // only when a terminal `done`/`error` event is pushed. A bare end() with no
+  // terminal event never resolves it — the exact gap that shipped d793dbde
+  // (the mock could not see the hang). extractResult mirrors pi: done →
+  // message, error → error.
+  private resultResolve: ((value: any) => void) | null = null;
+  private resultPromise: Promise<any> = new Promise((resolve) => {
+    this.resultResolve = resolve;
+  });
 
   push(event: any) {
     this.events.push(event);
+    if (event.type === 'done' || event.type === 'error') {
+      this.resultResolve?.(event.type === 'done' ? event.message : event.error);
+    }
     const callbacks = this.onCallbacks['data'] || [];
     for (const cb of callbacks) {
       cb(event);
@@ -17,10 +29,17 @@ class MockEventStream {
   }
 
   end() {
+    // Mirrors pi-ai: bare end() (no result arg) does NOT resolve result() —
+    // only a terminal event does. Keeping this faithful is what lets the
+    // flipped tests detect a hang.
     const callbacks = this.onCallbacks['end'] || [];
     for (const cb of callbacks) {
       cb();
     }
+  }
+
+  result() {
+    return this.resultPromise;
   }
 
   on(event: string, cb: Function) {
@@ -130,6 +149,16 @@ describe('provider.ts', () => {
     });
   });
 
+  describe('createAbortedMessage', () => {
+    it('should create a valid aborted AssistantMessage', () => {
+      const model = { api: 'openai', provider: 'openai', id: 'gpt-4o' } as any;
+      const msg = createAbortedMessage(model);
+      expect(msg.role).toBe('assistant');
+      expect(msg.stopReason).toBe('aborted');
+      expect(msg.errorMessage).toBeUndefined();
+    });
+  });
+
   describe('registerRouterProvider', () => {
     it('should register provider under router name', () => {
       registerRouterProvider(mockPi, mockState, mockActions);
@@ -170,6 +199,37 @@ describe('provider.ts', () => {
       expect(mockState.routerEnabled).toBe(true);
       expect(mockState.accumulatedCost).toBe(0.0015);
       expect(mockActions.persistState).toHaveBeenCalled();
+    });
+
+    it('should pass candidateTimeoutMs as timeoutMs to the delegated call', async () => {
+      mockState.currentConfig.candidateTimeoutMs = 45000;
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      vi.mocked(streamSimple).mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'done' };
+        })() as any,
+      );
+
+      const model = {
+        id: 'balanced',
+        api: 'router-api',
+        provider: 'router',
+      } as any;
+      const context = {
+        messages: [{ role: 'user', content: 'hello' }],
+      } as any;
+
+      registeredProviderOptions.streamSimple(model, context);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const callOptions = vi.mocked(streamSimple).mock.calls[0][2] as any;
+      expect(callOptions.timeoutMs).toBe(45000);
     });
 
     it('should try fallbacks if the primary model fails', async () => {
@@ -1003,6 +1063,17 @@ describe('provider.ts', () => {
     const sleep = (ms: number) =>
       new Promise((resolve) => setTimeout(resolve, ms));
 
+    // Asserts the stream terminated: result() resolved because a terminal
+    // event was pushed. Races against a timeout so a regression (bare end(),
+    // no terminal event) fails fast instead of stalling the suite.
+    const terminated = (stream: MockEventStream, ms = 500) =>
+      Promise.race([
+        stream.result().then(() => true),
+        new Promise<boolean>((resolve) =>
+          setTimeout(() => resolve(false), ms),
+        ),
+      ]);
+
     const makeModel = () =>
       ({ id: 'balanced', api: 'router-api', provider: 'router' }) as any;
     const makeContext = () =>
@@ -1050,7 +1121,11 @@ describe('provider.ts', () => {
       await sleep(100);
 
       // Silent end: no error event, no fallback retry, state persisted.
-      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      const abortedEvent = stream.events.find(
+        (e: any) => e.type === 'error' && e.reason === 'aborted',
+      );
+      expect(abortedEvent).toBeDefined();
+      expect(await terminated(stream)).toBe(true);
       expect(attempts).toEqual(['gpt-4o-mini']);
       expect(mockActions.persistState).toHaveBeenCalled();
     });
@@ -1093,7 +1168,11 @@ describe('provider.ts', () => {
       releaseDelegated();
       await sleep(100);
 
-      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      const abortedEvent = stream.events.find(
+        (e: any) => e.type === 'error' && e.reason === 'aborted',
+      );
+      expect(abortedEvent).toBeDefined();
+      expect(await terminated(stream)).toBe(true);
       expect(attempts).toEqual(['gpt-4o-mini']);
       expect(mockActions.persistState).toHaveBeenCalled();
     });
@@ -1131,7 +1210,11 @@ describe('provider.ts', () => {
 
       // Post-auth gate fired: no delegated stream opened, silent end.
       expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
-      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      const abortedEvent = stream.events.find(
+        (e: any) => e.type === 'error' && e.reason === 'aborted',
+      );
+      expect(abortedEvent).toBeDefined();
+      expect(await terminated(stream)).toBe(true);
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
@@ -1152,7 +1235,11 @@ describe('provider.ts', () => {
       registeredProviderOptions.streamSimple(makeModel(), makeContext());
       await sleep(100);
 
-      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      const abortedEvent = stream.events.find(
+        (e: any) => e.type === 'error' && e.reason === 'aborted',
+      );
+      expect(abortedEvent).toBeDefined();
+      expect(await terminated(stream)).toBe(true);
       expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
       expect(mockActions.persistState).toHaveBeenCalled();
     });
@@ -1268,7 +1355,11 @@ describe('provider.ts', () => {
       await sleep(100);
 
       // Post-classifier gate fired: silent end, no delegated stream opened.
-      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      const abortedEvent = stream.events.find(
+        (e: any) => e.type === 'error' && e.reason === 'aborted',
+      );
+      expect(abortedEvent).toBeDefined();
+      expect(await terminated(stream)).toBe(true);
       expect(attempts).toEqual(['gpt-4o-mini']);
       expect(mockActions.persistState).toHaveBeenCalled();
     });
@@ -1291,7 +1382,11 @@ describe('provider.ts', () => {
       registeredProviderOptions.streamSimple(makeModel(), makeContext());
       await sleep(100);
 
-      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      const abortedEvent = stream.events.find(
+        (e: any) => e.type === 'error' && e.reason === 'aborted',
+      );
+      expect(abortedEvent).toBeDefined();
+      expect(await terminated(stream)).toBe(true);
       expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
       expect(mockActions.persistState).toHaveBeenCalled();
     });

@@ -62,6 +62,7 @@ This example demonstrates every supported field. All fields except `profiles` ar
   },
   "phaseBias": 0.5,
   "maxSessionBudget": 1.0,
+  "candidateTimeoutMs": 120000,
   "models": {
     "gpt-pro": {
       "model": "openai/gpt-5.4-pro",
@@ -140,6 +141,7 @@ This example demonstrates every supported field. All fields except `profiles` ar
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `classifierModel`        | (Optional) Model used to categorize intent. Accepts either a model ref / alias string (`"google/gemini-flash-latest"`) or an object `{ "model": "alias-or-ref", "thinking": "off\|minimal\|low\|medium\|high\|xhigh" }`. If omitted, fast heuristics are used.                                                        |
 | `maxSessionBudget`       | (Optional) USD budget for the session. Forces a lower tier once exceeded; respects the available tiers (no silent re-promotion).                                                                                                                                                                                      |
+| `candidateTimeoutMs`     | (Optional) Per-attempt timeout in milliseconds for the classifier call and each delegated model attempt. A timed-out attempt counts as a failed candidate, so `fallbacks` and cross-tier degradation still apply. Default `120000` (2 minutes).      |
 | `phaseBias`              | (0.0 - 1.0) Stickiness of the current phase. Higher = more stable. Default `0.5`.                                                                                                                                                                                                                                     |
 | `rules`                  | List of custom keyword rules. Each rule: `{ "matches": "string\|string[]", "tier": "high\|medium\|low", "reason"?: "string" }`. When multiple rules match, the highest tier wins. Skipped when a tier is pinned.                                                                                                      |
 | `models`                 | (Optional) Map of model aliases to definitions: `{ "alias": { "model": "provider/id", "contextWindow"?: number, "maxTokens"?: number, "reasoning"?: boolean, "thinkingLevels"?: ThinkingLevel[] } }`. Aliases are usable wherever a model ref string is accepted (tier `model`, tier `fallbacks`, `classifierModel`). |
@@ -237,6 +239,18 @@ The router reports the **maximum** context window and output token limit across 
 ### Budget Gate Is Pre-Stream
 
 The session budget cap is checked **before** a turn starts streaming — a single in-flight turn can still exceed `maxSessionBudget`; the downgrade applies from the next turn onward.
+
+### Candidate Timeout
+
+Each delegated model attempt and the classifier call run under a timeout. The limit is `candidateTimeoutMs` (default `120000` — 2 minutes). A higher value suits slow providers.
+
+A timed-out attempt counts as a failed candidate. The same-tier `fallbacks` and cross-tier degradation therefore still apply.
+
+### Clean Aborts
+
+Pressing Esc (or replacing a session) mid-turn pushes a terminal `aborted` event before the stream ends. pi resolves the turn and shows "Operation aborted" instead of a hanging spinner.
+
+An abort never triggers an automatic retry or fallback. Only genuine failures (timeouts, rate limits, network errors) do.
 
 ### Turn-End Auto-Restore
 

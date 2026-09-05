@@ -1040,6 +1040,32 @@ describe('routing.ts', () => {
       expect(result?.tier).toBe('high');
       expect(callCount).toBe(1);
     });
+
+    it('passes signal and timeoutMs to streamSimple', async () => {
+      const mockStream = (async function* () {
+        yield {
+          type: 'text_delta',
+          delta: 'Tier: high\nConfidence: high\nReasoning: Deep.',
+        };
+      })();
+      vi.mocked(streamSimple).mockReturnValue(mockStream as any);
+
+      const controller = new AbortController();
+      await runClassifier(
+        ['openai/gpt-4o'],
+        mockRegistry,
+        context,
+        'planning',
+        'high',
+        false,
+        controller.signal,
+        30_000,
+      );
+
+      const callOptions = vi.mocked(streamSimple).mock.calls.at(-1)![2] as any;
+      expect(callOptions.signal).toBe(controller.signal);
+      expect(callOptions.timeoutMs).toBe(30_000);
+    });
   });
 
   describe('buildDelegationTierChain', () => {

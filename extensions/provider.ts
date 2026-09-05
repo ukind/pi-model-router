@@ -73,6 +73,28 @@ export const createErrorMessage = (
   };
 };
 
+export const createAbortedMessage = (
+  model: Model<Api>,
+): AssistantMessage => {
+  return {
+    role: 'assistant',
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: 'aborted',
+    timestamp: Date.now(),
+  };
+};
+
 /**
  * Heuristic token estimator (conservative: 3 characters per token)
  */
@@ -345,13 +367,21 @@ export const registerRouterProvider = (
               state.lastDecision?.phase,
               state.currentConfig.classifierModel.thinking,
               hasImageAttachment(context), // pass image-present flag
+              options?.signal,
+              state.currentConfig.candidateTimeoutMs,
             );
           }
 
           // The classifier await can span a session replacement. Re-verify
-          // liveness before any ctx-derived read below: direct return keeps
-          // the finally-running persistState and surfaces no error event.
+          // liveness before any ctx-derived read below. Push a terminal
+          // `aborted` event so pi's result() resolves (a bare end() hangs the
+          // spinner); the finally still runs persistState.
           if (state.isExtensionContextDead || options?.signal?.aborted) {
+            stream.push({
+              type: 'error',
+              reason: 'aborted',
+              error: createAbortedMessage(model),
+            });
             stream.end();
             return;
           }
@@ -541,8 +571,15 @@ export const registerRouterProvider = (
             for (let i = 0; i < modelsToTry.length; i++) {
               // Choke point: every tier transition and candidate retry
               // re-enters this loop top. After a replacement kill (dead
-              // flag) or a user abort, stop the fallback chain silently.
+              // flag) or a user abort, stop the fallback chain with a
+              // terminal `aborted` event so pi's result() resolves (a bare
+              // end() hangs the spinner).
               if (state.isExtensionContextDead || options?.signal?.aborted) {
+                stream.push({
+                  type: 'error',
+                  reason: 'aborted',
+                  error: createAbortedMessage(model),
+                });
                 stream.end();
                 return;
               }
@@ -572,8 +609,14 @@ export const registerRouterProvider = (
                 );
 
               // The auth fetch awaited — a replacement can land mid-await.
-              // Re-verify before opening the delegated stream.
+              // Re-verify before opening the delegated stream, then push a
+              // terminal `aborted` event so pi's result() resolves.
               if (state.isExtensionContextDead || options?.signal?.aborted) {
+                stream.push({
+                  type: 'error',
+                  reason: 'aborted',
+                  error: createAbortedMessage(model),
+                });
                 stream.end();
                 return;
               }
@@ -629,6 +672,13 @@ export const registerRouterProvider = (
                 const { reasoning: _piReasoning, ...delegationOptions } =
                   options ?? {};
 
+                // Slice 1 config field: normalizeConfig guarantees a
+                // positive number on the production path; the conditional
+                // spread guards raw configs (tests, hand-built state) where
+                // the field is absent.
+                const candidateTimeoutMs =
+                  state.currentConfig.candidateTimeoutMs;
+
                 // Custom (non-builtin) api ids — e.g. cliproxyapi-codex-responses —
                 // have no entry in compat's api-registry; compat streamSimple throws
                 // "No API provider registered for api: ...". Delegate through pi's
@@ -651,6 +701,9 @@ export const registerRouterProvider = (
                   !hasCompatApi && runtimeStreamSimple
                     ? runtimeStreamSimple(targetModel, effectiveContext, {
                         ...delegationOptions,
+                        ...(candidateTimeoutMs
+                          ? { timeoutMs: candidateTimeoutMs }
+                          : {}),
                         ...(delegatedReasoning
                           ? { reasoning: delegatedReasoning }
                           : {}),
@@ -659,6 +712,9 @@ export const registerRouterProvider = (
                         ...delegationOptions,
                         apiKey,
                         headers,
+                        ...(candidateTimeoutMs
+                          ? { timeoutMs: candidateTimeoutMs }
+                          : {}),
                         ...(delegatedReasoning
                           ? { reasoning: delegatedReasoning }
                           : {}),
@@ -766,14 +822,23 @@ export const registerRouterProvider = (
         } catch (error) {
           // Benign termination: a session replacement killed this turn.
           // Branch 1 — stale ctx throw: pi's exact prefix. Branch 2 —
-          // pi's abort: AbortError. Neither is a router failure, so no
-          // error event is pushed. Non-matching errors still surface.
+          // pi's abort: AbortError. Both push a terminal `aborted` event so
+          // pi's EventStream.result() resolves — a bare end() hangs the
+          // spinner (the d793dbde regression). pi renders "Operation aborted"
+          // and never auto-retries (stopReason 'aborted'). Non-matching
+          // errors still surface as genuine `error` events.
           const isStaleCtx =
             error instanceof Error &&
             error.message.startsWith(STALE_CTX_MESSAGE_PREFIX);
           const isAborted =
             error instanceof Error && error.name === 'AbortError';
-          if (!isStaleCtx && !isAborted) {
+          if (isStaleCtx || isAborted) {
+            stream.push({
+              type: 'error',
+              reason: 'aborted',
+              error: createAbortedMessage(model),
+            });
+          } else {
             stream.push({
               type: 'error',
               reason: 'error',

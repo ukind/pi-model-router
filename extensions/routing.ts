@@ -702,6 +702,8 @@ export const runClassifier = async (
   currentPhase?: RouterPhase,
   thinking?: ThinkingLevel,
   hasImage?: boolean,
+  signal?: AbortSignal,
+  timeoutMs?: number,
 ): Promise<ClassifierResult | undefined> => {
   for (const ref of refs) {
     try {
@@ -747,6 +749,8 @@ export const runClassifier = async (
         apiKey,
         headers,
         ...(reasoningOption ? { reasoning: reasoningOption } : {}),
+        ...(signal ? { signal } : {}),
+        ...(timeoutMs ? { timeoutMs } : {}),
       });
       let fullText = '';
       let contentReceived = false;
