@@ -320,6 +320,9 @@ const routerExtension = (pi: ExtensionAPI) => {
           get isExtensionContextDead() {
             return isExtensionContextDead;
           },
+          get debugEnabled() {
+            return debugEnabled;
+          },
           get selectedProfile() {
             return selectedProfile;
           },

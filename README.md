@@ -40,6 +40,14 @@ Or load directly for one run:
 pi -e ./extensions/index.ts
 ```
 
+Run the ESC-abort e2e harness (needs `pi` 0.84.x on PATH, network access, and a reachable target model):
+
+```bash
+PI_MODEL_ROUTER_E2E_TARGET=x-ai/grok-4-fast node scripts/e2e-esc-abort.mjs
+```
+
+The harness spawns the global `pi` in RPC mode inside a sandboxed `PI_CODING_AGENT_DIR` (a copy of your `models.json` plus a generated `model-router.json` — your real agent dir, sessions, and config are never touched). It reproduces the abort-poison class two ways: a plain mid-turn abort (at ~50% of the control turn's latency — the window is untargeted), and an abort after a `new_session` replacement. For every turn it reports the terminal shape, any `router[abort]` gate-line evidence, and router-state persistence counts, then prints an interpretation table. `PI_MODEL_ROUTER_E2E_TARGET` (required) is the `provider/model` ref every tier delegates to. Set `PI_MODEL_ROUTER_E2E_KEEP=1` to keep the sandbox for inspection. Exit 0 means every turn completed with an interpretable shape; exit 1 means a harness/protocol failure. A full run takes roughly two to five minutes, depending on classifier and target-model latency.
+
 ## Configuration
 
 Copy the example config to one of:

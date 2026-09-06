@@ -199,6 +199,7 @@ export const registerRouterProvider = (
       | undefined;
     readonly lastExtensionContext: ExtensionContext | undefined;
     readonly isExtensionContextDead: boolean;
+    readonly debugEnabled: boolean;
     selectedProfile: string | undefined;
     routerEnabled: boolean;
     lastDecision: RoutingDecision | undefined;
@@ -298,6 +299,25 @@ export const registerRouterProvider = (
     .join(',');
   if (state.lastRegisteredModels === modelsKey) return;
 
+  // Debug emitter for the four abort exits. Deliberate deviation from
+  // recordDebugDecision's guard (index.ts:132): NO isExtensionContextDead
+  // check. Gate 1 can fire BECAUSE the flag is set, and the flag can be set
+  // while the ctx still delivers (pi awaits session_shutdown handlers before
+  // invalidating the runner; captureCtx can set it conservatively) — those
+  // lines are the point of this instrumentation. The try/catch is
+  // load-bearing under either guard: a TOCTOU throw (flag false, ctx dies
+  // before notify) would otherwise skip this branch's stream.push and
+  // reclassify the exit through the catch below as reason:'error' instead
+  // of 'aborted'. Scoped: this helper only — recordDebugDecision,
+  // updateStatus, and every other reader keep the strict guard.
+  const debugAbort = (line: string): void => {
+    if (!state.debugEnabled || !state.lastExtensionContext) return;
+    try {
+      state.lastExtensionContext.ui.notify(`router[abort] ${line}`, 'info');
+    } catch {
+      // Dead egress plane. Best-effort only — the abort exit still runs.
+    }
+  };
   pi.registerProvider('router', {
     baseUrl: 'router://local',
     apiKey: 'pi-model-router',
@@ -330,6 +350,13 @@ export const registerRouterProvider = (
       }
 
       (async () => {
+        // Entry-time signal snapshot: the IIFE body runs synchronously to
+        // the first await, so this read is the truth at delegation entry.
+        const signalAbortedAtEntry = options?.signal?.aborted === true;
+        let classifierRan = false;
+        let iifePhase = 'entry';
+        let lastError: unknown;
+
         try {
           // The hoisted invariant guard above guarantees the registry is live
           // here; the getter's type remains `| undefined`, so snapshot it once
@@ -360,6 +387,7 @@ export const registerRouterProvider = (
               state.currentConfig.classifierModel.model,
               ...(state.currentConfig.classifierModel.fallbacks ?? []),
             ];
+            iifePhase = 'classifier';
             classifierResult = await runClassifier(
               classifierRefs,
               modelRegistry,
@@ -370,13 +398,18 @@ export const registerRouterProvider = (
               options?.signal,
               state.currentConfig.candidateTimeoutMs,
             );
+            classifierRan = true;
           }
+          iifePhase = 'post-classifier';
 
           // The classifier await can span a session replacement. Re-verify
           // liveness before any ctx-derived read below. Push a terminal
           // `aborted` event so pi's result() resolves (a bare end() hangs the
           // spinner); the finally still runs persistState.
           if (state.isExtensionContextDead || options?.signal?.aborted) {
+            debugAbort(
+              `gate1 profile=${model.id} dead=${state.isExtensionContextDead} signal=${options?.signal?.aborted === true} entry=${signalAbortedAtEntry} classifierRan=${classifierRan}`,
+            );
             stream.push({
               type: 'error',
               reason: 'aborted',
@@ -512,13 +545,13 @@ export const registerRouterProvider = (
           }
 
           // Cross-tier fallback loop
+          iifePhase = 'delegation';
           const tierChain = buildDelegationTierChain(
             decision.tier,
             isBudgetExceeded,
           );
           const originalTier = decision.tier;
 
-          let lastError: unknown;
           const skipReasons: string[] = [];
           let success = false;
 
@@ -575,6 +608,9 @@ export const registerRouterProvider = (
               // terminal `aborted` event so pi's result() resolves (a bare
               // end() hangs the spinner).
               if (state.isExtensionContextDead || options?.signal?.aborted) {
+                debugAbort(
+                  `gate2 loop-top profile=${model.id} tier=${currentTier} candidate=${i + 1}/${modelsToTry.length} dead=${state.isExtensionContextDead} signal=${options?.signal?.aborted === true}`,
+                );
                 stream.push({
                   type: 'error',
                   reason: 'aborted',
@@ -603,6 +639,7 @@ export const registerRouterProvider = (
                 continue;
               }
 
+              iifePhase = 'auth';
               const auth =
                 await modelRegistry.getApiKeyAndHeaders(
                   targetModel,
@@ -612,6 +649,9 @@ export const registerRouterProvider = (
               // Re-verify before opening the delegated stream, then push a
               // terminal `aborted` event so pi's result() resolves.
               if (state.isExtensionContextDead || options?.signal?.aborted) {
+                debugAbort(
+                  `gate3 post-auth profile=${model.id} tier=${currentTier} model=${targetProvider}/${targetModelId} dead=${state.isExtensionContextDead} signal=${options?.signal?.aborted === true}`,
+                );
                 stream.push({
                   type: 'error',
                   reason: 'aborted',
@@ -620,6 +660,7 @@ export const registerRouterProvider = (
                 stream.end();
                 return;
               }
+              iifePhase = 'delegation';
               if (!auth.ok || !auth.apiKey) {
                 lastError = new Error(
                   auth.ok
@@ -833,6 +874,9 @@ export const registerRouterProvider = (
           const isAborted =
             error instanceof Error && error.name === 'AbortError';
           if (isStaleCtx || isAborted) {
+            debugAbort(
+              `gate4 catch profile=${model.id} stale=${isStaleCtx} abort=${isAborted} phase=${iifePhase} delegated=${lastError !== undefined} name=${error instanceof Error ? error.name : typeof error} msg=${(error instanceof Error ? error.message : String(error)).slice(0, 120)}`,
+            );
             stream.push({
               type: 'error',
               reason: 'aborted',

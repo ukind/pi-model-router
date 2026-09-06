@@ -1390,6 +1390,465 @@ describe('provider.ts', () => {
       expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
       expect(mockActions.persistState).toHaveBeenCalled();
     });
+
+    // Two-turn sticky-state guard (FRD acceptance core): one ESC abort
+    // mid-classifier must not poison the NEXT turn. Both turns run through
+    // the SAME captured provider options and the SAME mockState — no reset
+    // between turns (a reset would mask exactly the sticky-state bugs this
+    // exists to catch: sticky dead flag, cached/reused signal, one-shot
+    // abort latch, delegation skip).
+    it('should recover on the next turn after a mid-classifier abort', async () => {
+      // Shared, configured ONCE: the classifier runs in both turns (no pin —
+      // a pin would skip the classifier entirely, see provider.ts pre-decision).
+      mockState.currentConfig.classifierModel = {
+        model: 'openai/gpt-4o-mini',
+        thinking: 'low',
+      };
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+
+      // ── Turn A stream
+      const streamA = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        streamA as any,
+      );
+
+      let releaseClassifier = () => {};
+      const classifierGate = new Promise<void>((resolve) => {
+        releaseClassifier = resolve;
+      });
+
+      // Order-dispatching mock: call 1 = turn A classifier (gated, then
+      // AbortError), call 2 = turn B classifier (instant), call 3 = turn B
+      // delegation (done). Both classifier calls target gpt-4o-mini
+      // (classifierModel.model, no fallbacks); the 'medium' yield is
+      // unparseable (no 'tier:' line) so runClassifier returns undefined and
+      // decideRouting's short-prompt branch picks 'low' (wordCount 1 <= 12),
+      // which is unconfigured in this profile — resolveAvailableTier falls
+      // up to 'medium', so the delegated target is gpt-4o-mini
+      // deterministically.
+      let compatCall = 0;
+      vi.mocked(streamSimple).mockImplementation((() => {
+        compatCall++;
+        if (compatCall === 1) {
+          return (async function* () {
+            yield { type: 'text_delta', delta: 'medium' };
+            await classifierGate;
+            const abortError = new Error('The operation was aborted');
+            abortError.name = 'AbortError';
+            throw abortError;
+          })() as any;
+        }
+        if (compatCall === 2) {
+          return (async function* () {
+            yield { type: 'text_delta', delta: 'medium' };
+          })() as any;
+        }
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'delegated answer' };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.0015 } } },
+          };
+        })() as any;
+      }) as any);
+
+      // ── Turn A: user ESC lands while the classifier is in flight.
+      const controllerA = new AbortController();
+      registeredProviderOptions.streamSimple(makeModel(), makeContext(), {
+        signal: controllerA.signal,
+      } as any);
+      await sleep(50);
+      // Classifier call in flight; nothing decided yet.
+      expect(vi.mocked(streamSimple).mock.calls.length).toBe(1);
+      expect(mockState.lastDecision).toBeUndefined();
+
+      controllerA.abort(); // ESC: signal aborted BEFORE the classifier finishes
+      releaseClassifier(); // classifier completes (runClassifier swallows the AbortError, returns undefined)
+      await sleep(100);
+
+      // Turn A exited at gate 1 on the signal branch: terminal aborted event,
+      // NO delegated call, decision never recorded, state persisted once.
+      const abortedEvent = streamA.events.find(
+        (e: any) => e.type === 'error' && e.reason === 'aborted',
+      );
+      expect(abortedEvent).toBeDefined();
+      expect(await terminated(streamA)).toBe(true);
+      expect(vi.mocked(streamSimple).mock.calls.length).toBe(1);
+      expect(mockState.lastDecision).toBeUndefined();
+      expect(mockActions.persistState).toHaveBeenCalledTimes(1);
+
+      // ── Turn B: SAME provider options, SAME mockState (no reset), fresh
+      // controller and fresh stream — exactly what pi does on the next turn.
+      const streamB = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        streamB as any,
+      );
+      const controllerB = new AbortController();
+      registeredProviderOptions.streamSimple(makeModel(), makeContext(), {
+        signal: controllerB.signal,
+      } as any);
+      await sleep(100);
+
+      // Turn B recovers: classifier runs, delegation streams to done.
+      expect(
+        streamB.events.find((e: any) => e.type === 'error'),
+      ).toBeUndefined();
+      const calls = vi.mocked(streamSimple).mock.calls;
+      expect(calls.length).toBe(3); // A-classifier + B-classifier + B-delegate
+      const delegateCall = calls[calls.length - 1];
+      expect(delegateCall[0].id).toBe('gpt-4o-mini'); // delegated target
+      expect((delegateCall[2] as any).signal).toBe(controllerB.signal); // fresh signal — NOT turn A's
+      const doneMessage = await streamB.result();
+      expect(doneMessage.usage.cost.total).toBe(0.0015); // resolved done, not aborted
+      expect(await terminated(streamB)).toBe(true);
+      expect(mockState.isExtensionContextDead).toBe(false); // no sticky flag write
+      expect(mockState.accumulatedCost).toBe(0.0015); // turn A contributed nothing
+      expect(mockActions.persistState).toHaveBeenCalledTimes(2); // exactly once per turn
+    });
+  });
+
+  // Slice 3: per-exit emission tests — sibling describe, inserted AFTER the
+  // closing `});` of `describe('session replacement gates (dead flag / abort)')`,
+  // inside the `registerRouterProvider` describe. Helpers are local per file
+  // convention (the gates describe scopes its own; only MockEventStream is
+  // module-level). Pure addition: the existing suites stay byte-identical.
+  describe('abort-gate debug emission (router[abort] lines)', () => {
+    const sleep = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
+
+    // Same contract mirror as the gates suite: true only when a terminal
+    // event resolved result(). Races a timeout so a bare-end() regression
+    // fails fast instead of stalling the suite.
+    const terminated = (stream: MockEventStream, ms = 500) =>
+      Promise.race([
+        stream.result().then(() => true),
+        new Promise<boolean>((resolve) =>
+          setTimeout(() => resolve(false), ms),
+        ),
+      ]);
+
+    const makeModel = () =>
+      ({ id: 'balanced', api: 'router-api', provider: 'router' }) as any;
+    const makeContext = () =>
+      ({ messages: [{ role: 'user', content: 'hello' }] }) as any;
+
+    // Debug on + a notify spy as the emission surface. The default ui mock
+    // (beforeEach, ~:119-122) has no notify — every emission test provides a
+    // callable one so assertions can see (or prove the absence of) gate lines.
+    const enableDebugEmission = (notifyImpl?: () => void) => {
+      const notify = vi.fn(notifyImpl);
+      mockState.debugEnabled = true;
+      mockState.lastExtensionContext = {
+        ui: { notify, setHiddenThinkingLabel: vi.fn() },
+      };
+      return notify;
+    };
+    const gateLines = (notify: ReturnType<typeof vi.fn>) =>
+      notify.mock.calls
+        .map((call: any) => String(call[0]))
+        .filter((line: string) => line.startsWith('router[abort]'));
+    const abortedEventOf = (stream: MockEventStream) =>
+      stream.events.find(
+        (e: any) => e.type === 'error' && e.reason === 'aborted',
+      );
+
+    it('emits one router[abort] gate1 line with the operand snapshot on a signal-aborted turn', async () => {
+      const notify = enableDebugEmission();
+      // Classifier configured: the instant compat mock completes it, so the
+      // line pins the post-await classifierRan wiring (the flag is set only
+      // after runClassifier resolves — provider.ts slice-1 section D).
+      mockState.currentConfig.classifierModel = {
+        model: 'openai/gpt-4o-mini',
+        thinking: 'low',
+      };
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      vi.mocked(streamSimple).mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'medium' };
+        })() as any,
+      );
+
+      const controller = new AbortController();
+      controller.abort(); // ESC before the turn starts: entry=true
+      registeredProviderOptions.streamSimple(makeModel(), makeContext(), {
+        signal: controller.signal,
+      } as any);
+      await sleep(50);
+
+      // Exactly one gate line, through the info notify transport.
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify).toHaveBeenCalledWith(
+        expect.stringMatching(/^router\[abort\] gate1 /),
+        'info',
+      );
+      const [line] = gateLines(notify);
+      expect(line).toContain('profile=balanced');
+      expect(line).toContain('dead=false');
+      expect(line).toContain('signal=true');
+      expect(line).toContain('entry=true');
+      expect(line).toContain('classifierRan=true');
+      // Turn still ends through the original gate-1 exit.
+      expect(abortedEventOf(stream)).toBeDefined();
+      expect(await terminated(stream)).toBe(true);
+      expect(mockActions.persistState).toHaveBeenCalledTimes(1);
+    });
+
+    it('emits router[abort] gate2 line when a replacement kill stops the candidate retry', async () => {
+      const notify = enableDebugEmission();
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      let releaseDelegated = () => {};
+      const midStreamGate = new Promise<void>((resolve) => {
+        releaseDelegated = resolve;
+      });
+      const attempts: string[] = [];
+      vi.mocked(streamSimple).mockImplementation(((model: any) => {
+        attempts.push(model.id);
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'partial' };
+          await midStreamGate;
+          const abortError = new Error('The operation was aborted');
+          abortError.name = 'AbortError';
+          throw abortError;
+        })() as any;
+      }) as any);
+
+      // Pin medium: [gpt-4o-mini, gemini-1.5-flash].
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(50);
+      expect(attempts).toEqual(['gpt-4o-mini']);
+
+      // Replacement lands mid-stream: flag set, delegated stream aborted.
+      mockState.isExtensionContextDead = true;
+      releaseDelegated();
+      await sleep(100);
+
+      // The per-candidate catch swallows the AbortError (provider.ts:769-772);
+      // the retry is stopped by the loop-top gate — exactly what emits here.
+      expect(notify).toHaveBeenCalledTimes(1);
+      const [line] = gateLines(notify);
+      expect(line).toContain('gate2 loop-top');
+      expect(line).toContain('profile=balanced');
+      expect(line).toContain('tier=medium');
+      expect(line).toContain('candidate=2/2');
+      expect(line).toContain('dead=true');
+      expect(line).toContain('signal=false');
+      expect(abortedEventOf(stream)).toBeDefined();
+      expect(await terminated(stream)).toBe(true);
+      expect(attempts).toEqual(['gpt-4o-mini']); // candidate 2 never opened
+      expect(mockActions.persistState).toHaveBeenCalledTimes(1);
+    });
+
+    it('emits router[abort] gate3 line when a replacement lands during the auth await', async () => {
+      const notify = enableDebugEmission();
+      let releaseAuth = () => {};
+      const authGate = new Promise<void>((resolve) => {
+        releaseAuth = resolve;
+      });
+      mockState.currentModelRegistry.getApiKeyAndHeaders = async () => {
+        await authGate;
+        return { ok: true, apiKey: 'key', headers: {} };
+      };
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      vi.mocked(streamSimple).mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'never reached' };
+        })() as any,
+      );
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(50);
+
+      // Replacement lands while the auth fetch is in flight.
+      mockState.isExtensionContextDead = true;
+      releaseAuth();
+      await sleep(100);
+
+      expect(notify).toHaveBeenCalledTimes(1);
+      const [line] = gateLines(notify);
+      expect(line).toContain('gate3 post-auth');
+      expect(line).toContain('profile=balanced');
+      expect(line).toContain('tier=medium');
+      expect(line).toContain('model=openai/gpt-4o-mini');
+      expect(line).toContain('dead=true');
+      expect(line).toContain('signal=false');
+      expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
+      expect(abortedEventOf(stream)).toBeDefined();
+      expect(await terminated(stream)).toBe(true);
+      expect(mockActions.persistState).toHaveBeenCalledTimes(1);
+    });
+
+    it('emits router[abort] gate4 line for a direct AbortError into the catch', async () => {
+      const notify = enableDebugEmission();
+      // AbortError thrown before the delegation loop (syncPiThinkingLevel
+      // runs pre-chain at provider.ts:504): phase stays 'post-classifier'
+      // and lastError is unset — delegated=false.
+      mockActions.syncPiThinkingLevel = vi.fn(() => {
+        const abortError = new Error('The operation was aborted');
+        abortError.name = 'AbortError';
+        throw abortError;
+      });
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(50);
+
+      expect(notify).toHaveBeenCalledTimes(1);
+      const [line] = gateLines(notify);
+      expect(line).toContain('gate4 catch');
+      expect(line).toContain('profile=balanced');
+      expect(line).toContain('stale=false');
+      expect(line).toContain('abort=true');
+      expect(line).toContain('phase=post-classifier');
+      expect(line).toContain('delegated=false');
+      expect(line).toContain('name=AbortError');
+      expect(line).toContain('msg=The operation was aborted');
+      expect(abortedEventOf(stream)).toBeDefined();
+      expect(await terminated(stream)).toBe(true);
+      expect(mockActions.persistState).toHaveBeenCalledTimes(1);
+    });
+
+    it('emits router[abort] gate4 line with delegated=true when an exhausted chain rethrows a swallowed AbortError', async () => {
+      const notify = enableDebugEmission();
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      const attempts: string[] = [];
+      vi.mocked(streamSimple).mockImplementation(((model: any) => {
+        attempts.push(model.id);
+        return (async function* () {
+          const abortError = new Error('The operation was aborted');
+          abortError.name = 'AbortError';
+          throw abortError;
+        })() as any;
+      }) as any);
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(100);
+
+      // No abort state is set, so the loop-top gate lets every candidate
+      // open; each candidate's AbortError is swallowed into lastError, the chain
+      // exhausts, and `throw lastError` re-enters the catch (delegated=true
+      // — the arm the poison research flagged as indistinguishable without
+      // the phase/delegated markers).
+      expect(attempts).toEqual([
+        'gpt-4o-mini',
+        'gemini-1.5-flash',
+        // Up-chain: medium is not budget-capped, so after both medium
+        // candidates throw, the chain reaches the configured high tier.
+        'gpt-4o',
+      ]);
+      expect(notify).toHaveBeenCalledTimes(1);
+      const [line] = gateLines(notify);
+      expect(line).toContain('gate4 catch');
+      expect(line).toContain('stale=false');
+      expect(line).toContain('abort=true');
+      expect(line).toContain('phase=delegation');
+      expect(line).toContain('delegated=true');
+      expect(line).toContain('name=AbortError');
+      // Name-based classification keeps the rethrow benign — not reason:'error'.
+      const errorEvent = stream.events.find((e: any) => e.type === 'error');
+      expect(errorEvent).toBeDefined();
+      expect(errorEvent.reason).toBe('aborted');
+      expect(await terminated(stream)).toBe(true);
+      expect(mockActions.persistState).toHaveBeenCalledTimes(1);
+    });
+
+    it('stays inert with debug off: no notify, terminal contract unchanged', async () => {
+      // Explicit off (the default mockState omits the key — falsy — the
+      // explicit flag documents the contract under test): the emitter must
+      // short-circuit before touching ui, and the gate exit must behave
+      // exactly as pre-instrumentation.
+      mockState.debugEnabled = false;
+      const notify = vi.fn();
+      mockState.lastExtensionContext = {
+        ui: { notify, setHiddenThinkingLabel: vi.fn() },
+      };
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      const controller = new AbortController();
+      controller.abort();
+      registeredProviderOptions.streamSimple(makeModel(), makeContext(), {
+        signal: controller.signal,
+      } as any);
+      await sleep(50);
+
+      expect(notify).not.toHaveBeenCalled();
+      expect(abortedEventOf(stream)).toBeDefined();
+      expect(await terminated(stream)).toBe(true);
+      expect(mockActions.persistState).toHaveBeenCalledTimes(1);
+    });
+
+    it('swallows a dead-egress notify throw: gate-1 classification survives, no gate-4 re-emit', async () => {
+      // TOCTOU shape (D1): the guard passed (debug on, ctx present) but the
+      // egress plane died before notify ran. The emitter's try/catch must
+      // swallow so the ORIGINAL gate's push still lands — an escaping throw
+      // would skip the branch's stream.push and reclassify through gate 4
+      // as reason:'error' (the d793dbde regression class).
+      const notify = enableDebugEmission(() => {
+        throw new Error('egress plane dead');
+      });
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      const controller = new AbortController();
+      controller.abort();
+      registeredProviderOptions.streamSimple(makeModel(), makeContext(), {
+        signal: controller.signal,
+      } as any);
+      await sleep(50);
+
+      // Gate 1 attempted its emit exactly once; the throw was contained. A
+      // gate-4 reclassification would emit a second line (debug still on,
+      // ctx still set), so call count 1 IS the no-reclassification proof.
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(String((notify.mock.calls[0] as any[])[0])).toMatch(
+        /^router\[abort\] gate1 /,
+      );
+      expect(abortedEventOf(stream)).toBeDefined();
+      expect(
+        stream.events.find(
+          (e: any) => e.type === 'error' && e.reason === 'error',
+        ),
+      ).toBeUndefined();
+      expect(await terminated(stream)).toBe(true);
+      expect(mockActions.persistState).toHaveBeenCalledTimes(1);
+    });
   });
   });
 });
