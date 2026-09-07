@@ -14,6 +14,8 @@ import {
   decideRouting,
   parseClassifierOutput,
   runClassifier,
+  raceStallTimeout,
+  stallGuardedStream,
 } from './routing';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
 import type { Context, Message, UserMessage } from '@earendil-works/pi-ai';
@@ -1039,6 +1041,106 @@ describe('routing.ts', () => {
       );
       expect(result?.tier).toBe('high');
       expect(callCount).toBe(1);
+    });
+  });
+
+  describe('watchdog helpers', () => {
+    const sleep = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
+
+    it('raceStallTimeout resolves a fast promise', async () => {
+      const result = await raceStallTimeout(
+        Promise.resolve('ok'),
+        25,
+        undefined,
+        'test',
+      );
+      expect(result).toBe('ok');
+    });
+
+    it('raceStallTimeout rejects with StallTimeoutError on silence', async () => {
+      await expect(
+        raceStallTimeout(new Promise<void>(() => {}), 15, undefined, 'test'),
+      ).rejects.toMatchObject({ name: 'StallTimeoutError' });
+    });
+
+    it('raceStallTimeout rejects with AbortError when the signal pre-fires', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      await expect(
+        raceStallTimeout(Promise.resolve('ok'), 1000, controller.signal),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+    });
+
+    // Discriminating reset test: per-gap 8ms stays under the 60ms timer,
+    // but 10 x 8ms = 80ms cumulative exceeds it — with the per-event reset
+    // deleted (timer armed once) the timer fires mid-stream and this fails.
+    it('stallGuardedStream passes events and resets the timer per event', async () => {
+      const events: string[] = [];
+      const source = async function* () {
+        for (let i = 0; i < 10; i++) {
+          await sleep(8);
+          yield `event-${i}`;
+        }
+      };
+      for await (const event of stallGuardedStream(
+        source(),
+        60,
+        undefined,
+        undefined,
+        'test',
+      )) {
+        events.push(event as string);
+      }
+      expect(events).toHaveLength(10);
+    });
+
+    it('stallGuardedStream calls onStall then throws on silence', async () => {
+      let stalled = false;
+      const source = async function* () {
+        yield 'first';
+        await new Promise<void>(() => {}); // never yields again
+      };
+      const consume = async () => {
+        for await (const event of stallGuardedStream(
+          source(),
+          15,
+          () => {
+            stalled = true;
+          },
+          undefined,
+          'test',
+        )) {
+          void event;
+        }
+      };
+      await expect(consume()).rejects.toMatchObject({
+        name: 'StallTimeoutError',
+      });
+      await sleep(80);
+      expect(stalled).toBe(true);
+    });
+
+    it('stallGuardedStream throws AbortError when the signal fires mid-stream', async () => {
+      const controller = new AbortController();
+      const source = async function* () {
+        yield 'first';
+        await new Promise<void>(() => {});
+      };
+      const consume = async () => {
+        for await (const event of stallGuardedStream(
+          source(),
+          1000,
+          undefined,
+          controller.signal,
+        )) {
+          void event;
+        }
+      };
+      const pending = consume();
+      await sleep(10);
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
     });
   });
 

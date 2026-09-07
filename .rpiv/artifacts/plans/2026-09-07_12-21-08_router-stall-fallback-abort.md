@@ -506,15 +506,15 @@ export const stallGuardedStream = async function* <T>(
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Watchdog unit tests pass: `npx vitest run extensions/routing.test.ts -t "watchdog helpers"`
-- [ ] Existing classifier suite unregressed: `npx vitest run extensions/routing.test.ts`
-- [ ] Type check passes: `npm run tsc`
-- [ ] Both helper exports present: `grep -cE "export const (raceStallTimeout|stallGuardedStream)" extensions/routing.ts` returns exactly 2
-- [ ] No fake timers introduced: `grep -rn "useFakeTimers" extensions/ | wc -l` returns 0
-- [ ] Full suite green: `npx vitest run`
+- [x] Watchdog unit tests pass: `npx vitest run extensions/routing.test.ts -t "watchdog helpers"`
+- [x] Existing classifier suite unregressed: `npx vitest run extensions/routing.test.ts`
+- [x] Type check passes: `npm run tsc`
+- [x] Both helper exports present: `grep -cE "export const (raceStallTimeout|stallGuardedStream)" extensions/routing.ts` returns exactly 2
+- [x] No fake timers introduced: `grep -rn "useFakeTimers" extensions/ | wc -l` returns 0
+- [x] Full suite green: `npx vitest run`
 
 #### Manual Verification:
-- [ ] No unhandled-rejection warnings in vitest output for the watchdog tests (abandoned never-yielding promises stay silent)
+- [x] No unhandled-rejection warnings in vitest output for the watchdog tests (abandoned never-yielding promises stay silent)
 
 ## Phase 3: Aborted terminal-event contract
 
