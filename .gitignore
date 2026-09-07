@@ -3,3 +3,5 @@
 node_modules
 router-debug.log
 docs/plans/
+.cache/
+pi-session-*.html
