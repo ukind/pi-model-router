@@ -15,6 +15,7 @@ import type {
   ClassifierPromptContext,
 } from './types';
 import { parseCanonicalModelRef, isRouterTier, ROUTER_TIERS } from './config';
+import { DEFAULT_STALL_TIMEOUT_MS } from './constants';
 
 export const extractTextFromContent = (
   content: string | Message['content'],
@@ -807,14 +808,38 @@ export const runClassifier = async (
   currentPhase?: RouterPhase,
   thinking?: ThinkingLevel,
   hasImage?: boolean,
+  signal?: AbortSignal,
+  stallTimeoutMs?: number,
+  onStall?: (ref: string, ms: number) => void,
 ): Promise<ClassifierResult | undefined> => {
+  const timeoutMs = stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
   for (const ref of refs) {
+    if (signal?.aborted) {
+      return undefined;
+    }
+
+    // Per-ref kill switch: run-abort propagation + stall abort (same manual
+    // composition as the delegated path). Declared BEFORE the try so the
+    // sibling finally can detach the listener (try-scoped consts are not
+    // visible in finally).
+    const refAbort = new AbortController();
+    const propagateRefAbort = () => refAbort.abort(signal?.reason);
+    if (signal?.aborted) {
+      refAbort.abort();
+    } else if (signal) {
+      signal.addEventListener('abort', propagateRefAbort, { once: true });
+    }
     try {
       const { provider, modelId } = parseCanonicalModelRef(ref);
       const model = modelRegistry.find(provider, modelId);
       if (!model) continue;
 
-      const auth = await modelRegistry.getApiKeyAndHeaders(model);
+      const auth = await raceStallTimeout(
+        modelRegistry.getApiKeyAndHeaders(model),
+        timeoutMs,
+        signal,
+        `classifier auth for ${ref}`,
+      );
       if (!auth.ok || !auth.apiKey) continue;
       const apiKey = auth.apiKey;
       const headers = auth.headers;
@@ -851,11 +876,18 @@ export const runClassifier = async (
       const stream = streamSimple(model, classifierContext, {
         apiKey,
         headers,
+        signal: refAbort.signal,
         ...(reasoningOption ? { reasoning: reasoningOption } : {}),
       });
       let fullText = '';
       let contentReceived = false;
-      for await (const event of stream) {
+      for await (const event of stallGuardedStream(
+        stream,
+        timeoutMs,
+        () => refAbort.abort(),
+        refAbort.signal,
+        `classifier ${ref}`,
+      )) {
         if (event.type === 'error' && !contentReceived) {
           break;
         }
@@ -880,8 +912,14 @@ export const runClassifier = async (
         failureReason: 'success',
       };
     } catch (error) {
-      // ponytail: infra failure (invalid ref / auth reject / stream threw) — try next ref
+      // Infra failure (invalid ref / auth reject / stall / stream threw) —
+      // try next ref. Stall additionally notifies via the caller's callback.
+      if (isStallTimeoutError(error)) {
+        onStall?.(ref, timeoutMs);
+      }
       void error;
+    } finally {
+      signal?.removeEventListener('abort', propagateRefAbort);
     }
   }
   return undefined;

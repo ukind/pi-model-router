@@ -1426,6 +1426,55 @@ describe('provider.ts', () => {
       expect(terminalEvent.reason).toBe('aborted');
       expect(mockState.lastExtensionContext.ui.notify).not.toHaveBeenCalled();
     });
+
+    it('should degrade to heuristics when the classifier stalls', async () => {
+      mockState.currentConfig.classifierModel = {
+        model: 'openai/classifier-only',
+        fallbacks: [],
+      };
+      mockState.currentConfig.stallTimeoutMs = 20;
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      mockState.lastExtensionContext.ui.notify = vi.fn();
+
+      const delegated: string[] = [];
+      vi.mocked(streamSimple).mockImplementation(((model: any) => {
+        if (model.id === 'classifier-only') {
+          return (async function* () {
+            await new Promise<void>(() => {}); // classifier stall
+          })() as any;
+        }
+        delegated.push(model.id);
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'heuristic answer' };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.0005 } } },
+          };
+        })() as any;
+      }) as any);
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(150);
+
+      // classifier stalled → undefined → heuristics ('hello' → low tier →
+      // falls up to medium — no low tier in the mock config) → delegated stream
+      expect(delegated).toEqual(['gpt-4o-mini']);
+      expect(
+        stream.events.find((e: any) => e.type === 'error'),
+      ).toBeUndefined();
+      expect(
+        mockState.lastExtensionContext.ui.notify,
+      ).toHaveBeenCalledWith(
+        expect.stringContaining('classifier'),
+        'warning',
+      );
+      expect(mockActions.persistState).toHaveBeenCalled();
+    });
   });
   });
 });

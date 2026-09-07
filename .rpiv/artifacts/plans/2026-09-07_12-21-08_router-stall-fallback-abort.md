@@ -1112,10 +1112,10 @@ export const runClassifier = async (
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Stall tests pass: `npx vitest run extensions/routing.test.ts extensions/provider.test.ts -t "stall"`
-- [ ] Full suite green: `npx vitest run`
-- [ ] Type check: `npm run tsc`
-- [ ] Build: `npm run build`
+- [x] Stall tests pass: `npx vitest run extensions/routing.test.ts extensions/provider.test.ts -t "stall"`
+- [x] Full suite green: `npx vitest run`
+- [x] Type check: `npm run tsc`
+- [x] Build: `npm run build`
 
 #### Manual Verification:
 - [ ] Esc during a classifier stall aborts immediately (no wedge, no `/quit`)

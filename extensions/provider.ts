@@ -398,6 +398,11 @@ export const registerRouterProvider = (
               state.lastDecision?.phase,
               state.currentConfig.classifierModel.thinking,
               hasImageAttachment(context), // pass image-present flag
+              options?.signal,
+              stallTimeoutMs,
+              (ref, ms) => {
+                notifyStall(`classifier ${ref} stalled after ${ms}ms`);
+              },
             );
           }
 

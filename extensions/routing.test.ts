@@ -1042,6 +1042,78 @@ describe('routing.ts', () => {
       expect(result?.tier).toBe('high');
       expect(callCount).toBe(1);
     });
+
+    it('retries next ref on classifier stream stall', async () => {
+      let callCount = 0;
+      vi.mocked(streamSimple).mockImplementation((() => {
+        callCount++;
+        if (callCount === 1) {
+          return (async function* () {
+            await new Promise<void>(() => {}); // stall — never yields
+          })() as any;
+        }
+        return (async function* () {
+          yield {
+            type: 'text_delta',
+            delta: 'Tier: medium\nConfidence: medium\nReasoning: Normal.',
+          };
+        })();
+      }) as any);
+      const result = await runClassifier(
+        ['openai/gpt-4o', 'google/gemini-flash'],
+        mockRegistry,
+        context,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        15,
+      );
+      expect(result?.tier).toBe('medium');
+      expect(callCount).toBe(2);
+    });
+
+    it('returns undefined when all refs stall', async () => {
+      const onStall = vi.fn();
+      vi.mocked(streamSimple).mockImplementation((() => {
+        return (async function* () {
+          await new Promise<void>(() => {});
+        })() as any;
+      }) as any);
+      const result = await runClassifier(
+        ['openai/gpt-4o', 'google/gemini-flash'],
+        mockRegistry,
+        context,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        15,
+        onStall,
+      );
+      expect(result).toBeUndefined();
+      expect(onStall).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns undefined immediately when the signal is pre-aborted', async () => {
+      // The shared streamSimple mock accumulates call history across tests
+      // (no clearMocks in this file) — clear it so not.toHaveBeenCalled is
+      // meaningful.
+      vi.mocked(streamSimple).mockClear();
+      const controller = new AbortController();
+      controller.abort();
+      const result = await runClassifier(
+        ['openai/gpt-4o'],
+        mockRegistry,
+        context,
+        undefined,
+        undefined,
+        undefined,
+        controller.signal,
+      );
+      expect(result).toBeUndefined();
+      expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
+    });
   });
 
   describe('watchdog helpers', () => {
