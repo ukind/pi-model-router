@@ -1049,8 +1049,11 @@ describe('provider.ts', () => {
       releaseDelegated();
       await sleep(100);
 
-      // Silent end: no error event, no fallback retry, state persisted.
-      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      // Aborted terminal event: no fallback retry, state persisted.
+      const terminalEvent = stream.events.find((e: any) => e.type === 'error');
+      expect(terminalEvent).toBeDefined();
+      expect(terminalEvent.reason).toBe('aborted');
+      expect(terminalEvent.error.stopReason).toBe('aborted');
       expect(attempts).toEqual(['gpt-4o-mini']);
       expect(mockActions.persistState).toHaveBeenCalled();
     });
@@ -1093,7 +1096,10 @@ describe('provider.ts', () => {
       releaseDelegated();
       await sleep(100);
 
-      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      const terminalEvent = stream.events.find((e: any) => e.type === 'error');
+      expect(terminalEvent).toBeDefined();
+      expect(terminalEvent.reason).toBe('aborted');
+      expect(terminalEvent.error.stopReason).toBe('aborted');
       expect(attempts).toEqual(['gpt-4o-mini']);
       expect(mockActions.persistState).toHaveBeenCalled();
     });
@@ -1129,13 +1135,16 @@ describe('provider.ts', () => {
       releaseAuth();
       await sleep(100);
 
-      // Post-auth gate fired: no delegated stream opened, silent end.
+      // Post-auth gate fired: no delegated stream opened, aborted end.
       expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
-      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      const terminalEvent = stream.events.find((e: any) => e.type === 'error');
+      expect(terminalEvent).toBeDefined();
+      expect(terminalEvent.reason).toBe('aborted');
+      expect(terminalEvent.error.stopReason).toBe('aborted');
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
-    it('should classify a stale-ctx throw as benign: no error event, still persists', async () => {
+    it('should classify a stale-ctx throw as benign: aborted terminal event, still persists', async () => {
       // A pi-backed action throws pi's exact stale message mid-IIFE.
       mockActions.syncPiThinkingLevel = vi.fn(() => {
         throw new Error(
@@ -1152,7 +1161,10 @@ describe('provider.ts', () => {
       registeredProviderOptions.streamSimple(makeModel(), makeContext());
       await sleep(100);
 
-      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      const terminalEvent = stream.events.find((e: any) => e.type === 'error');
+      expect(terminalEvent).toBeDefined();
+      expect(terminalEvent.reason).toBe('aborted');
+      expect(terminalEvent.error.stopReason).toBe('aborted');
       expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
       expect(mockActions.persistState).toHaveBeenCalled();
     });
@@ -1267,13 +1279,16 @@ describe('provider.ts', () => {
       releaseClassifier();
       await sleep(100);
 
-      // Post-classifier gate fired: silent end, no delegated stream opened.
-      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      // Post-classifier gate fired: aborted end, no delegated stream opened.
+      const terminalEvent = stream.events.find((e: any) => e.type === 'error');
+      expect(terminalEvent).toBeDefined();
+      expect(terminalEvent.reason).toBe('aborted');
+      expect(terminalEvent.error.stopReason).toBe('aborted');
       expect(attempts).toEqual(['gpt-4o-mini']);
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
-    it('should classify pi abort (AbortError) as benign: no error event', async () => {
+    it('should classify pi abort (AbortError) as benign: aborted terminal event', async () => {
       // AbortError thrown straight into the IIFE catch (not swallowed by
       // the per-candidate catch) — proves the catch's second branch.
       mockActions.syncPiThinkingLevel = vi.fn(() => {
@@ -1291,7 +1306,10 @@ describe('provider.ts', () => {
       registeredProviderOptions.streamSimple(makeModel(), makeContext());
       await sleep(100);
 
-      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      const terminalEvent = stream.events.find((e: any) => e.type === 'error');
+      expect(terminalEvent).toBeDefined();
+      expect(terminalEvent.reason).toBe('aborted');
+      expect(terminalEvent.error.stopReason).toBe('aborted');
       expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
       expect(mockActions.persistState).toHaveBeenCalled();
     });

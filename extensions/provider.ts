@@ -73,6 +73,41 @@ export const createErrorMessage = (
   };
 };
 
+export const createAbortedMessage = (model: Model<Api>): AssistantMessage => {
+  return {
+    role: 'assistant',
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: 'aborted',
+    timestamp: Date.now(),
+  };
+};
+
+const pushAbortedEnd = (
+  stream: AssistantMessageEventStream,
+  model: Model<Api>,
+): void => {
+  // Push BEFORE end(): a done/error event — not a bare end() — is what
+  // resolves pi's response.result() (event-stream.js isComplete). Bare
+  // end() parks agent-loop.js:238 forever ("Working..." wedge).
+  stream.push({
+    type: 'error',
+    reason: 'aborted',
+    error: createAbortedMessage(model),
+  });
+  stream.end();
+};
+
 /**
  * Heuristic token estimator (conservative: 3 characters per token)
  */
@@ -352,7 +387,7 @@ export const registerRouterProvider = (
           // liveness before any ctx-derived read below: direct return keeps
           // the finally-running persistState and surfaces no error event.
           if (state.isExtensionContextDead || options?.signal?.aborted) {
-            stream.end();
+            pushAbortedEnd(stream, model);
             return;
           }
 
@@ -543,7 +578,7 @@ export const registerRouterProvider = (
               // re-enters this loop top. After a replacement kill (dead
               // flag) or a user abort, stop the fallback chain silently.
               if (state.isExtensionContextDead || options?.signal?.aborted) {
-                stream.end();
+                pushAbortedEnd(stream, model);
                 return;
               }
               const modelRef = modelsToTry[i];
@@ -574,7 +609,7 @@ export const registerRouterProvider = (
               // The auth fetch awaited — a replacement can land mid-await.
               // Re-verify before opening the delegated stream.
               if (state.isExtensionContextDead || options?.signal?.aborted) {
-                stream.end();
+                pushAbortedEnd(stream, model);
                 return;
               }
               if (!auth.ok || !auth.apiKey) {
@@ -766,8 +801,9 @@ export const registerRouterProvider = (
         } catch (error) {
           // Benign termination: a session replacement killed this turn.
           // Branch 1 — stale ctx throw: pi's exact prefix. Branch 2 —
-          // pi's abort: AbortError. Neither is a router failure, so no
-          // error event is pushed. Non-matching errors still surface.
+          // pi's abort: AbortError. Neither is a router failure, so both
+          // end with the aborted terminal event. Non-matching errors
+          // still surface.
           const isStaleCtx =
             error instanceof Error &&
             error.message.startsWith(STALE_CTX_MESSAGE_PREFIX);
@@ -782,8 +818,14 @@ export const registerRouterProvider = (
                 error instanceof Error ? error.message : String(error),
               ),
             });
+            stream.end();
+          } else {
+            // Stale ctx / user abort: end with the builtin-shaped aborted
+            // terminal event. Harmless on the stale-ctx path (session
+            // discarded); mandatory on the user-abort path (pi wedges on a
+            // bare end()).
+            pushAbortedEnd(stream, model);
           }
-          stream.end();
         } finally {
           actions.persistState();
         }

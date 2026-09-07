@@ -625,12 +625,11 @@ const pushAbortedEnd = (
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Provider suite passes with updated expectations: `npx vitest run extensions/provider.test.ts`
-- [ ] Full type check passes: `npm run tsc`
-- [ ] Helper wired at all exits: `grep -c "pushAbortedEnd" extensions/provider.ts` returns >= 5 (1 definition + 4 call sites)
-- [ ] Bare end() only on already-resolving paths: `grep -c "stream.end()" extensions/provider.ts` returns exactly 4 (registry guard :306, success path :765, real-error branch of the catch, pushAbortedEnd internal)
-- [ ] Full suite green: `npx vitest run`
-
+- [x] Provider suite passes with updated expectations: `npx vitest run extensions/provider.test.ts`
+- [x] Full type check passes: `npm run tsc`
+- [x] Helper wired at all exits: `grep -c "pushAbortedEnd" extensions/provider.ts` returns >= 5 (1 definition + 4 call sites)
+- [x] Bare end() only on already-resolving paths: `grep -c "stream.end()" extensions/provider.ts` returns exactly 4 (registry guard :306, success path :765, real-error branch of the catch, pushAbortedEnd internal)
+- [x] Full suite green: `npx vitest run`
 #### Manual Verification:
 - [ ] Terminal-event shape parity with builtins: `grep -n "reason: output.stopReason" node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js`
 - [ ] Esc mid-router-stream in a live pi session: UI shows "Operation aborted"; the next prompt works (no "Agent is already processing" wedge)
