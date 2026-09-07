@@ -25,7 +25,6 @@ import type {
   RoutedTierConfig,
 } from './types';
 
-import { DEFAULT_CANDIDATE_TIMEOUT_MS } from './constants';
 vi.mock('@earendil-works/pi-coding-agent', () => ({
   getAgentDir: () => '/mock/agent/dir',
 }));
@@ -46,6 +45,7 @@ vi.mock('node:fs', () => ({
     ) {
       return JSON.stringify({
         debug: true,
+        stallTimeoutMs: 30000,
         profiles: {
           globalProfile: {
             medium: { model: 'openai/gpt-4o' },
@@ -147,7 +147,6 @@ describe('config.ts', () => {
     it('should merge profiles and models override', () => {
       const base: RouterConfig = {
         debug: false,
-        candidateTimeoutMs: 90000,
         profiles: {
           balanced: {
             medium: { model: 'openai/gpt-4o-mini' },
@@ -160,7 +159,6 @@ describe('config.ts', () => {
 
       const override: Partial<RouterConfig> = {
         debug: true,
-        candidateTimeoutMs: 60000,
         profiles: {
           balanced: {
             high: { model: 'openai/gpt-4o' },
@@ -176,7 +174,6 @@ describe('config.ts', () => {
 
       const merged = mergeConfig(base, override);
       expect(merged.debug).toBe(true);
-      expect(merged.candidateTimeoutMs).toBe(60000);
       expect(merged.profiles.balanced.medium?.model).toBe('openai/gpt-4o-mini');
       expect(merged.profiles.balanced.high?.model).toBe('openai/gpt-4o');
       expect(merged.profiles.cheap?.low?.model).toBe('openai/gpt-4o-mini');
@@ -278,7 +275,6 @@ describe('config.ts', () => {
         debug: true,
         phaseBias: 0.8,
         maxSessionBudget: 5.5,
-        candidateTimeoutMs: 60000,
         classifierModel: 'gpt4',
         rules: [
           { matches: 'test', tier: 'high', reason: 'Rule reason' },
@@ -301,7 +297,6 @@ describe('config.ts', () => {
       expect(config.debug).toBe(true);
       expect(config.phaseBias).toBe(0.8);
       expect(config.maxSessionBudget).toBe(5.5);
-      expect(config.candidateTimeoutMs).toBe(60000);
       expect(config.classifierModel?.model).toBe('openai/gpt-4o');
       expect(config.rules?.length).toBe(2);
       expect(config.profiles.balanced?.high?.model).toBe(
@@ -309,21 +304,25 @@ describe('config.ts', () => {
       );
     });
 
-    it('should default candidateTimeoutMs to DEFAULT_CANDIDATE_TIMEOUT_MS when absent', () => {
-      const raw = {
-        profiles: { balanced: { high: { model: 'openai/gpt-4o' } } },
-      };
-      const { config } = normalizeConfig(raw as unknown as RouterConfig);
-      expect(config.candidateTimeoutMs).toBe(DEFAULT_CANDIDATE_TIMEOUT_MS);
+    it('should default stallTimeoutMs to 90000 when absent', () => {
+      const { config } = normalizeConfig({ profiles: {} } as RouterConfig);
+      expect(config.stallTimeoutMs).toBe(90000);
     });
 
-    it('should default candidateTimeoutMs when invalid (non-positive)', () => {
-      const raw = {
-        candidateTimeoutMs: -1,
-        profiles: { balanced: { high: { model: 'openai/gpt-4o' } } },
-      };
-      const { config } = normalizeConfig(raw as unknown as RouterConfig);
-      expect(config.candidateTimeoutMs).toBe(DEFAULT_CANDIDATE_TIMEOUT_MS);
+    it('should normalize invalid stallTimeoutMs to 90000', () => {
+      const { config } = normalizeConfig({
+        stallTimeoutMs: -5,
+        profiles: {},
+      } as unknown as RouterConfig);
+      expect(config.stallTimeoutMs).toBe(90000);
+    });
+
+    it('should keep a valid stallTimeoutMs', () => {
+      const { config } = normalizeConfig({
+        stallTimeoutMs: 30000,
+        profiles: {},
+      } as RouterConfig);
+      expect(config.stallTimeoutMs).toBe(30000);
     });
   });
 
@@ -337,6 +336,11 @@ describe('config.ts', () => {
       expect(config.profiles.projectProfile?.high?.model).toBe(
         'google/gemini-1.5-pro',
       );
+    });
+
+    it('should carry stallTimeoutMs through the merge whitelist', () => {
+      const { config } = loadRouterConfig('/path/exists');
+      expect(config.stallTimeoutMs).toBe(30000);
     });
   });
 

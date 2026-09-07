@@ -30,7 +30,11 @@ import {
   resolveMaxTokens,
   collectProfileThinkingLevels,
 } from './config';
-import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_TOKENS,
+  DEFAULT_STALL_TIMEOUT_MS,
+} from './constants';
 import {
   phaseForTier,
   buildRoutingDecision,
@@ -41,6 +45,9 @@ import {
   extractTextFromContent,
   hasImageAttachment,
   getLastUserText,
+  raceStallTimeout,
+  stallGuardedStream,
+  isStallTimeoutError,
 } from './routing';
 
 // Exact pi stale-ctx message prefix (ctx getters throw with this prefix in
@@ -73,9 +80,7 @@ export const createErrorMessage = (
   };
 };
 
-export const createAbortedMessage = (
-  model: Model<Api>,
-): AssistantMessage => {
+export const createAbortedMessage = (model: Model<Api>): AssistantMessage => {
   return {
     role: 'assistant',
     content: [],
@@ -93,6 +98,21 @@ export const createAbortedMessage = (
     stopReason: 'aborted',
     timestamp: Date.now(),
   };
+};
+
+const pushAbortedEnd = (
+  stream: AssistantMessageEventStream,
+  model: Model<Api>,
+): void => {
+  // Push BEFORE end(): a done/error event — not a bare end() — is what
+  // resolves pi's response.result() (event-stream.js isComplete). Bare
+  // end() parks agent-loop.js:238 forever ("Working..." wedge).
+  stream.push({
+    type: 'error',
+    reason: 'aborted',
+    error: createAbortedMessage(model),
+  });
+  stream.end();
 };
 
 /**
@@ -199,7 +219,6 @@ export const registerRouterProvider = (
       | undefined;
     readonly lastExtensionContext: ExtensionContext | undefined;
     readonly isExtensionContextDead: boolean;
-    readonly debugEnabled: boolean;
     selectedProfile: string | undefined;
     routerEnabled: boolean;
     lastDecision: RoutingDecision | undefined;
@@ -299,25 +318,6 @@ export const registerRouterProvider = (
     .join(',');
   if (state.lastRegisteredModels === modelsKey) return;
 
-  // Debug emitter for the four abort exits. Deliberate deviation from
-  // recordDebugDecision's guard (index.ts:132): NO isExtensionContextDead
-  // check. Gate 1 can fire BECAUSE the flag is set, and the flag can be set
-  // while the ctx still delivers (pi awaits session_shutdown handlers before
-  // invalidating the runner; captureCtx can set it conservatively) — those
-  // lines are the point of this instrumentation. The try/catch is
-  // load-bearing under either guard: a TOCTOU throw (flag false, ctx dies
-  // before notify) would otherwise skip this branch's stream.push and
-  // reclassify the exit through the catch below as reason:'error' instead
-  // of 'aborted'. Scoped: this helper only — recordDebugDecision,
-  // updateStatus, and every other reader keep the strict guard.
-  const debugAbort = (line: string): void => {
-    if (!state.debugEnabled || !state.lastExtensionContext) return;
-    try {
-      state.lastExtensionContext.ui.notify(`router[abort] ${line}`, 'info');
-    } catch {
-      // Dead egress plane. Best-effort only — the abort exit still runs.
-    }
-  };
   pi.registerProvider('router', {
     baseUrl: 'router://local',
     apiKey: 'pi-model-router',
@@ -350,13 +350,6 @@ export const registerRouterProvider = (
       }
 
       (async () => {
-        // Entry-time signal snapshot: the IIFE body runs synchronously to
-        // the first await, so this read is the truth at delegation entry.
-        const signalAbortedAtEntry = options?.signal?.aborted === true;
-        let classifierRan = false;
-        let iifePhase = 'entry';
-        let lastError: unknown;
-
         try {
           // The hoisted invariant guard above guarantees the registry is live
           // here; the getter's type remains `| undefined`, so snapshot it once
@@ -375,6 +368,17 @@ export const registerRouterProvider = (
             state.currentConfig.maxSessionBudget !== undefined &&
             state.accumulatedCost >= state.currentConfig.maxSessionBudget;
 
+          const stallTimeoutMs =
+            state.currentConfig.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+
+          const notifyStall = (message: string) => {
+            if (state.lastExtensionContext && !state.isExtensionContextDead) {
+              state.lastExtensionContext.ui.notify(
+                `router: ${message} — trying next`,
+                'warning',
+              );
+            }
+          };
           // Pre-decision: gate classifier on no pin (always run when configured)
           const prompt = getLastUserText(context).toLowerCase();
           const ruleHit = !pinnedTier
@@ -387,7 +391,6 @@ export const registerRouterProvider = (
               state.currentConfig.classifierModel.model,
               ...(state.currentConfig.classifierModel.fallbacks ?? []),
             ];
-            iifePhase = 'classifier';
             classifierResult = await runClassifier(
               classifierRefs,
               modelRegistry,
@@ -396,26 +399,18 @@ export const registerRouterProvider = (
               state.currentConfig.classifierModel.thinking,
               hasImageAttachment(context), // pass image-present flag
               options?.signal,
-              state.currentConfig.candidateTimeoutMs,
+              stallTimeoutMs,
+              (ref, ms) => {
+                notifyStall(`classifier ${ref} stalled after ${ms}ms`);
+              },
             );
-            classifierRan = true;
           }
-          iifePhase = 'post-classifier';
 
           // The classifier await can span a session replacement. Re-verify
-          // liveness before any ctx-derived read below. Push a terminal
-          // `aborted` event so pi's result() resolves (a bare end() hangs the
-          // spinner); the finally still runs persistState.
+          // liveness before any ctx-derived read below: direct return keeps
+          // the finally-running persistState and surfaces no error event.
           if (state.isExtensionContextDead || options?.signal?.aborted) {
-            debugAbort(
-              `gate1 profile=${model.id} dead=${state.isExtensionContextDead} signal=${options?.signal?.aborted === true} entry=${signalAbortedAtEntry} classifierRan=${classifierRan}`,
-            );
-            stream.push({
-              type: 'error',
-              reason: 'aborted',
-              error: createAbortedMessage(model),
-            });
-            stream.end();
+            pushAbortedEnd(stream, model);
             return;
           }
 
@@ -545,13 +540,14 @@ export const registerRouterProvider = (
           }
 
           // Cross-tier fallback loop
-          iifePhase = 'delegation';
           const tierChain = buildDelegationTierChain(
             decision.tier,
             isBudgetExceeded,
           );
           const originalTier = decision.tier;
 
+          let lastError: unknown;
+          const stallFallbacks: string[] = [];
           const skipReasons: string[] = [];
           let success = false;
 
@@ -604,19 +600,9 @@ export const registerRouterProvider = (
             for (let i = 0; i < modelsToTry.length; i++) {
               // Choke point: every tier transition and candidate retry
               // re-enters this loop top. After a replacement kill (dead
-              // flag) or a user abort, stop the fallback chain with a
-              // terminal `aborted` event so pi's result() resolves (a bare
-              // end() hangs the spinner).
+              // flag) or a user abort, stop the fallback chain silently.
               if (state.isExtensionContextDead || options?.signal?.aborted) {
-                debugAbort(
-                  `gate2 loop-top profile=${model.id} tier=${currentTier} candidate=${i + 1}/${modelsToTry.length} dead=${state.isExtensionContextDead} signal=${options?.signal?.aborted === true}`,
-                );
-                stream.push({
-                  type: 'error',
-                  reason: 'aborted',
-                  error: createAbortedMessage(model),
-                });
-                stream.end();
+                pushAbortedEnd(stream, model);
                 return;
               }
               const modelRef = modelsToTry[i];
@@ -639,28 +625,33 @@ export const registerRouterProvider = (
                 continue;
               }
 
-              iifePhase = 'auth';
-              const auth =
-                await modelRegistry.getApiKeyAndHeaders(
-                  targetModel,
-                );
+              const authResult = await raceStallTimeout(
+                modelRegistry.getApiKeyAndHeaders(targetModel),
+                stallTimeoutMs,
+                options?.signal,
+                `auth for ${modelRef}`,
+              ).then(
+                (value) => ({ ok: true as const, value }),
+                (reason) => ({ ok: false as const, reason }),
+              );
+              if (!authResult.ok) {
+                lastError = authResult.reason;
+                if (isStallTimeoutError(authResult.reason)) {
+                  stallFallbacks.push(authResult.reason.message);
+                  notifyStall(authResult.reason.message);
+                }
+                continue;
+                // abort: next loop-top choke (Phase 3) does pushAbortedEnd + return;
+                // as-last-candidate: throw lastError → outer catch isAborted → pushAbortedEnd
+              }
+              const auth = authResult.value;
 
               // The auth fetch awaited — a replacement can land mid-await.
-              // Re-verify before opening the delegated stream, then push a
-              // terminal `aborted` event so pi's result() resolves.
+              // Re-verify before opening the delegated stream.
               if (state.isExtensionContextDead || options?.signal?.aborted) {
-                debugAbort(
-                  `gate3 post-auth profile=${model.id} tier=${currentTier} model=${targetProvider}/${targetModelId} dead=${state.isExtensionContextDead} signal=${options?.signal?.aborted === true}`,
-                );
-                stream.push({
-                  type: 'error',
-                  reason: 'aborted',
-                  error: createAbortedMessage(model),
-                });
-                stream.end();
+                pushAbortedEnd(stream, model);
                 return;
               }
-              iifePhase = 'delegation';
               if (!auth.ok || !auth.apiKey) {
                 lastError = new Error(
                   auth.ok
@@ -672,6 +663,23 @@ export const registerRouterProvider = (
               const apiKey = auth.apiKey;
               const headers = auth.headers;
 
+              // (e) per-candidate kill switch — declarations live outside the
+              // sibling try/finally so the finally can detach the listener.
+              // On stall we abort this controller to error the in-flight
+              // SSE read. Compose the run signal + kill switch manually —
+              // pi-ai ships combineAbortSignals in dist/utils but does NOT
+              // re-export it (blocked by the package exports map).
+              const candidateAbort = new AbortController();
+              const runSignal = options?.signal;
+              const propagateAbort = () =>
+                candidateAbort.abort(runSignal?.reason);
+              if (runSignal?.aborted) {
+                candidateAbort.abort();
+              } else if (runSignal) {
+                runSignal.addEventListener('abort', propagateAbort, {
+                  once: true,
+                });
+              }
               try {
                 let effectiveContext = context;
                 const targetLimit = resolveContextWindow(
@@ -713,13 +721,6 @@ export const registerRouterProvider = (
                 const { reasoning: _piReasoning, ...delegationOptions } =
                   options ?? {};
 
-                // Slice 1 config field: normalizeConfig guarantees a
-                // positive number on the production path; the conditional
-                // spread guards raw configs (tests, hand-built state) where
-                // the field is absent.
-                const candidateTimeoutMs =
-                  state.currentConfig.candidateTimeoutMs;
-
                 // Custom (non-builtin) api ids — e.g. cliproxyapi-codex-responses —
                 // have no entry in compat's api-registry; compat streamSimple throws
                 // "No API provider registered for api: ...". Delegate through pi's
@@ -742,27 +743,29 @@ export const registerRouterProvider = (
                   !hasCompatApi && runtimeStreamSimple
                     ? runtimeStreamSimple(targetModel, effectiveContext, {
                         ...delegationOptions,
-                        ...(candidateTimeoutMs
-                          ? { timeoutMs: candidateTimeoutMs }
-                          : {}),
+                        signal: candidateAbort.signal,
                         ...(delegatedReasoning
                           ? { reasoning: delegatedReasoning }
                           : {}),
                       })
                     : streamSimple(targetModel, effectiveContext, {
                         ...delegationOptions,
+                        signal: candidateAbort.signal,
                         apiKey,
                         headers,
-                        ...(candidateTimeoutMs
-                          ? { timeoutMs: candidateTimeoutMs }
-                          : {}),
                         ...(delegatedReasoning
                           ? { reasoning: delegatedReasoning }
                           : {}),
                       });
 
                 let contentReceived = false;
-                for await (const event of delegatedStream) {
+                for await (const event of stallGuardedStream(
+                  delegatedStream,
+                  stallTimeoutMs,
+                  () => candidateAbort.abort(),
+                  candidateAbort.signal,
+                  modelRef,
+                )) {
                   if (event.type === 'done') {
                     state.accumulatedCost +=
                       event.message.usage?.cost?.total ?? 0;
@@ -836,9 +839,20 @@ export const registerRouterProvider = (
                 ) {
                   actions.updateStatus(state.lastExtensionContext);
                 }
+                if (stallFallbacks.length > 0) {
+                  decision.reasoning =
+                    `Recovered from ${stallFallbacks.length} stall(s): ${stallFallbacks.join('; ')}. ` +
+                    `(Original: ${decision.reasoning})`;
+                }
                 break outer;
               } catch (err) {
                 lastError = err;
+                if (isStallTimeoutError(err)) {
+                  stallFallbacks.push(err.message);
+                  notifyStall(err.message);
+                }
+              } finally {
+                runSignal?.removeEventListener('abort', propagateAbort);
               }
             }
           }
@@ -863,26 +877,15 @@ export const registerRouterProvider = (
         } catch (error) {
           // Benign termination: a session replacement killed this turn.
           // Branch 1 — stale ctx throw: pi's exact prefix. Branch 2 —
-          // pi's abort: AbortError. Both push a terminal `aborted` event so
-          // pi's EventStream.result() resolves — a bare end() hangs the
-          // spinner (the d793dbde regression). pi renders "Operation aborted"
-          // and never auto-retries (stopReason 'aborted'). Non-matching
-          // errors still surface as genuine `error` events.
+          // pi's abort: AbortError. Neither is a router failure, so both
+          // end with the aborted terminal event. Non-matching errors
+          // still surface.
           const isStaleCtx =
             error instanceof Error &&
             error.message.startsWith(STALE_CTX_MESSAGE_PREFIX);
           const isAborted =
             error instanceof Error && error.name === 'AbortError';
-          if (isStaleCtx || isAborted) {
-            debugAbort(
-              `gate4 catch profile=${model.id} stale=${isStaleCtx} abort=${isAborted} phase=${iifePhase} delegated=${lastError !== undefined} name=${error instanceof Error ? error.name : typeof error} msg=${(error instanceof Error ? error.message : String(error)).slice(0, 120)}`,
-            );
-            stream.push({
-              type: 'error',
-              reason: 'aborted',
-              error: createAbortedMessage(model),
-            });
-          } else {
+          if (!isStaleCtx && !isAborted) {
             stream.push({
               type: 'error',
               reason: 'error',
@@ -891,8 +894,14 @@ export const registerRouterProvider = (
                 error instanceof Error ? error.message : String(error),
               ),
             });
+            stream.end();
+          } else {
+            // Stale ctx / user abort: end with the builtin-shaped aborted
+            // terminal event. Harmless on the stale-ctx path (session
+            // discarded); mandatory on the user-abort path (pi wedges on a
+            // bare end()).
+            pushAbortedEnd(stream, model);
           }
-          stream.end();
         } finally {
           actions.persistState();
         }

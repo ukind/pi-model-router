@@ -87,7 +87,7 @@ export interface RouterConfig {
   classifierModel?: ClassifierConfig;
   phaseBias?: number;
   maxSessionBudget?: number;
-  candidateTimeoutMs?: number;
+  stallTimeoutMs?: number;
   rules?: RoutingRule[];
   profiles: Record<string, RouterProfile>;
   models?: Record<string, ModelDefinition>;

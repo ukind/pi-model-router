@@ -40,14 +40,6 @@ Or load directly for one run:
 pi -e ./extensions/index.ts
 ```
 
-Run the ESC-abort e2e harness (needs `pi` 0.84.x on PATH, network access, and a reachable target model):
-
-```bash
-PI_MODEL_ROUTER_E2E_TARGET=x-ai/grok-4-fast node scripts/e2e-esc-abort.mjs
-```
-
-The harness spawns the global `pi` in RPC mode inside a sandboxed `PI_CODING_AGENT_DIR` (a copy of your `models.json` plus a generated `model-router.json` — your real agent dir, sessions, and config are never touched). It reproduces the abort-poison class two ways: a plain mid-turn abort (at ~50% of the control turn's latency — the window is untargeted), and an abort after a `new_session` replacement. For every turn it reports the terminal shape, any `router[abort]` gate-line evidence, and router-state persistence counts, then prints an interpretation table. `PI_MODEL_ROUTER_E2E_TARGET` (required) is the `provider/model` ref every tier delegates to. Set `PI_MODEL_ROUTER_E2E_KEEP=1` to keep the sandbox for inspection. Exit 0 means every turn completed with an interpretable shape; exit 1 means a harness/protocol failure. A full run takes roughly two to five minutes, depending on classifier and target-model latency.
-
 ## Configuration
 
 Copy the example config to one of:
@@ -70,7 +62,7 @@ This example demonstrates every supported field. All fields except `profiles` ar
   },
   "phaseBias": 0.5,
   "maxSessionBudget": 1.0,
-  "candidateTimeoutMs": 120000,
+  "stallTimeoutMs": 90000,
   "models": {
     "gpt-pro": {
       "model": "openai/gpt-5.4-pro",
@@ -149,7 +141,7 @@ This example demonstrates every supported field. All fields except `profiles` ar
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `classifierModel`        | (Optional) Model used to categorize intent. Accepts either a model ref / alias string (`"google/gemini-flash-latest"`) or an object `{ "model": "alias-or-ref", "thinking": "off\|minimal\|low\|medium\|high\|xhigh" }`. If omitted, fast heuristics are used.                                                        |
 | `maxSessionBudget`       | (Optional) USD budget for the session. Forces a lower tier once exceeded; respects the available tiers (no silent re-promotion).                                                                                                                                                                                      |
-| `candidateTimeoutMs`     | (Optional) Per-attempt timeout in milliseconds for the classifier call and each delegated model attempt. A timed-out attempt counts as a failed candidate, so `fallbacks` and cross-tier degradation still apply. Default `120000` (2 minutes).      |
+| `stallTimeoutMs`         | (Optional) Inactivity timeout in milliseconds for every external wait in the per-turn path (classifier stream, delegated model stream, auth fetch). Zero stream events for this long counts as a stall: the stalled model is cancelled and the next fallback model is tried. Default `90000`. |
 | `phaseBias`              | (0.0 - 1.0) Stickiness of the current phase. Higher = more stable. Default `0.5`.                                                                                                                                                                                                                                     |
 | `rules`                  | List of custom keyword rules. Each rule: `{ "matches": "string\|string[]", "tier": "high\|medium\|low", "reason"?: "string" }`. When multiple rules match, the highest tier wins. Skipped when a tier is pinned.                                                                                                      |
 | `models`                 | (Optional) Map of model aliases to definitions: `{ "alias": { "model": "provider/id", "contextWindow"?: number, "maxTokens"?: number, "reasoning"?: boolean, "thinkingLevels"?: ThinkingLevel[] } }`. Aliases are usable wherever a model ref string is accepted (tier `model`, tier `fallbacks`, `classifierModel`). |
@@ -247,18 +239,6 @@ The router reports the **maximum** context window and output token limit across 
 ### Budget Gate Is Pre-Stream
 
 The session budget cap is checked **before** a turn starts streaming — a single in-flight turn can still exceed `maxSessionBudget`; the downgrade applies from the next turn onward.
-
-### Candidate Timeout
-
-Each delegated model attempt and the classifier call run under a timeout. The limit is `candidateTimeoutMs` (default `120000` — 2 minutes). A higher value suits slow providers.
-
-A timed-out attempt counts as a failed candidate. The same-tier `fallbacks` and cross-tier degradation therefore still apply.
-
-### Clean Aborts
-
-Pressing Esc (or replacing a session) mid-turn pushes a terminal `aborted` event before the stream ends. pi resolves the turn and shows "Operation aborted" instead of a hanging spinner.
-
-An abort never triggers an automatic retry or fallback. Only genuine failures (timeouts, rate limits, network errors) do.
 
 ### Turn-End Auto-Restore
 
