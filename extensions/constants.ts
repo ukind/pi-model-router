@@ -2,3 +2,4 @@ export const MAX_DEBUG_HISTORY = 12;
 export const MAX_CALIBRATION_ENTRIES = 5;
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export const DEFAULT_MAX_TOKENS = 16_384;
+export const DEFAULT_STALL_TIMEOUT_MS = 90_000;

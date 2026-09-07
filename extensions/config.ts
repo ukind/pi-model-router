@@ -15,8 +15,11 @@ import type {
   ClassifierConfig,
 } from './types';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
-
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_TOKENS,
+  DEFAULT_STALL_TIMEOUT_MS,
+} from './constants';
 export const ROUTER_TIERS = ['high', 'medium', 'low'] as const;
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [
@@ -139,6 +142,7 @@ export const mergeConfig = (
     ),
     phaseBias: override.phaseBias ?? base.phaseBias,
     maxSessionBudget: override.maxSessionBudget ?? base.maxSessionBudget,
+    stallTimeoutMs: override.stallTimeoutMs ?? base.stallTimeoutMs,
     rules: override.rules ?? base.rules,
     profiles: mergedProfiles,
     models: Object.keys(mergedModels).length > 0 ? mergedModels : undefined,
@@ -422,6 +426,10 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
     typeof raw.maxSessionBudget === 'number' && raw.maxSessionBudget > 0
       ? raw.maxSessionBudget
       : undefined;
+  const stallTimeoutMs =
+    typeof raw.stallTimeoutMs === 'number' && raw.stallTimeoutMs > 0
+      ? raw.stallTimeoutMs
+      : DEFAULT_STALL_TIMEOUT_MS;
 
   const rules: RoutingRule[] = [];
   if (Array.isArray(raw.rules)) {
@@ -526,6 +534,7 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
       classifierModel,
       phaseBias,
       maxSessionBudget,
+      stallTimeoutMs,
       rules: rules.length > 0 ? rules : undefined,
       profiles: normalizedProfiles,
       models: hasModels ? normalizedModels : undefined,

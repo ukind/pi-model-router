@@ -62,6 +62,7 @@ This example demonstrates every supported field. All fields except `profiles` ar
   },
   "phaseBias": 0.5,
   "maxSessionBudget": 1.0,
+  "stallTimeoutMs": 90000,
   "models": {
     "gpt-pro": {
       "model": "openai/gpt-5.4-pro",
@@ -140,6 +141,7 @@ This example demonstrates every supported field. All fields except `profiles` ar
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `classifierModel`        | (Optional) Model used to categorize intent. Accepts either a model ref / alias string (`"google/gemini-flash-latest"`) or an object `{ "model": "alias-or-ref", "thinking": "off\|minimal\|low\|medium\|high\|xhigh" }`. If omitted, fast heuristics are used.                                                        |
 | `maxSessionBudget`       | (Optional) USD budget for the session. Forces a lower tier once exceeded; respects the available tiers (no silent re-promotion).                                                                                                                                                                                      |
+| `stallTimeoutMs`         | (Optional) Inactivity timeout in milliseconds for every external wait in the per-turn path (classifier stream, delegated model stream, auth fetch). Zero stream events for this long counts as a stall: the stalled model is cancelled and the next fallback model is tried. Default `90000`. |
 | `phaseBias`              | (0.0 - 1.0) Stickiness of the current phase. Higher = more stable. Default `0.5`.                                                                                                                                                                                                                                     |
 | `rules`                  | List of custom keyword rules. Each rule: `{ "matches": "string\|string[]", "tier": "high\|medium\|low", "reason"?: "string" }`. When multiple rules match, the highest tier wins. Skipped when a tier is pinned.                                                                                                      |
 | `models`                 | (Optional) Map of model aliases to definitions: `{ "alias": { "model": "provider/id", "contextWindow"?: number, "maxTokens"?: number, "reasoning"?: boolean, "thinkingLevels"?: ThinkingLevel[] } }`. Aliases are usable wherever a model ref string is accepted (tier `model`, tier `fallbacks`, `classifierModel`). |

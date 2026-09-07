@@ -45,6 +45,7 @@ vi.mock('node:fs', () => ({
     ) {
       return JSON.stringify({
         debug: true,
+        stallTimeoutMs: 30000,
         profiles: {
           globalProfile: {
             medium: { model: 'openai/gpt-4o' },
@@ -302,6 +303,27 @@ describe('config.ts', () => {
         'google/gemini-2.5-pro',
       );
     });
+
+    it('should default stallTimeoutMs to 90000 when absent', () => {
+      const { config } = normalizeConfig({ profiles: {} } as RouterConfig);
+      expect(config.stallTimeoutMs).toBe(90000);
+    });
+
+    it('should normalize invalid stallTimeoutMs to 90000', () => {
+      const { config } = normalizeConfig({
+        stallTimeoutMs: -5,
+        profiles: {},
+      } as unknown as RouterConfig);
+      expect(config.stallTimeoutMs).toBe(90000);
+    });
+
+    it('should keep a valid stallTimeoutMs', () => {
+      const { config } = normalizeConfig({
+        stallTimeoutMs: 30000,
+        profiles: {},
+      } as RouterConfig);
+      expect(config.stallTimeoutMs).toBe(30000);
+    });
   });
 
   describe('loadRouterConfig', () => {
@@ -314,6 +336,11 @@ describe('config.ts', () => {
       expect(config.profiles.projectProfile?.high?.model).toBe(
         'google/gemini-1.5-pro',
       );
+    });
+
+    it('should carry stallTimeoutMs through the merge whitelist', () => {
+      const { config } = loadRouterConfig('/path/exists');
+      expect(config.stallTimeoutMs).toBe(30000);
     });
   });
 

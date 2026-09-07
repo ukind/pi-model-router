@@ -265,11 +265,11 @@ import {
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Config tests pass: `npx vitest run extensions/config.test.ts`
-- [ ] Full type check passes: `npm run tsc`
-- [ ] Merge-whitelist detector passes: `npx vitest run extensions/config.test.ts -t "merge whitelist"`
-- [ ] Knob flow present: `grep -c "stallTimeoutMs" extensions/config.ts` returns >= 3
-- [ ] Full suite green: `npx vitest run`
+- [x] Config tests pass: `npx vitest run extensions/config.test.ts`
+- [x] Full type check passes: `npm run tsc`
+- [x] Merge-whitelist detector passes: `npx vitest run extensions/config.test.ts -t "merge whitelist"`
+- [x] Knob flow present: `grep -c "stallTimeoutMs" extensions/config.ts` returns >= 3
+- [x] Full suite green: `npx vitest run`
 
 #### Manual Verification:
 - [ ] `model-router.example.json` parses as valid JSON; the new key sits directly after `maxSessionBudget`
