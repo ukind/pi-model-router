@@ -30,7 +30,11 @@ import {
   resolveMaxTokens,
   collectProfileThinkingLevels,
 } from './config';
-import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_TOKENS,
+  DEFAULT_STALL_TIMEOUT_MS,
+} from './constants';
 import {
   phaseForTier,
   buildRoutingDecision,
@@ -41,6 +45,9 @@ import {
   extractTextFromContent,
   hasImageAttachment,
   getLastUserText,
+  raceStallTimeout,
+  stallGuardedStream,
+  isStallTimeoutError,
 } from './routing';
 
 // Exact pi stale-ctx message prefix (ctx getters throw with this prefix in
@@ -361,6 +368,17 @@ export const registerRouterProvider = (
             state.currentConfig.maxSessionBudget !== undefined &&
             state.accumulatedCost >= state.currentConfig.maxSessionBudget;
 
+          const stallTimeoutMs =
+            state.currentConfig.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+
+          const notifyStall = (message: string) => {
+            if (state.lastExtensionContext && !state.isExtensionContextDead) {
+              state.lastExtensionContext.ui.notify(
+                `router: ${message} — trying next`,
+                'warning',
+              );
+            }
+          };
           // Pre-decision: gate classifier on no pin (always run when configured)
           const prompt = getLastUserText(context).toLowerCase();
           const ruleHit = !pinnedTier
@@ -524,6 +542,7 @@ export const registerRouterProvider = (
           const originalTier = decision.tier;
 
           let lastError: unknown;
+          const stallFallbacks: string[] = [];
           const skipReasons: string[] = [];
           let success = false;
 
@@ -601,10 +620,26 @@ export const registerRouterProvider = (
                 continue;
               }
 
-              const auth =
-                await modelRegistry.getApiKeyAndHeaders(
-                  targetModel,
-                );
+              const authResult = await raceStallTimeout(
+                modelRegistry.getApiKeyAndHeaders(targetModel),
+                stallTimeoutMs,
+                options?.signal,
+                `auth for ${modelRef}`,
+              ).then(
+                (value) => ({ ok: true as const, value }),
+                (reason) => ({ ok: false as const, reason }),
+              );
+              if (!authResult.ok) {
+                lastError = authResult.reason;
+                if (isStallTimeoutError(authResult.reason)) {
+                  stallFallbacks.push(authResult.reason.message);
+                  notifyStall(authResult.reason.message);
+                }
+                continue;
+                // abort: next loop-top choke (Phase 3) does pushAbortedEnd + return;
+                // as-last-candidate: throw lastError → outer catch isAborted → pushAbortedEnd
+              }
+              const auth = authResult.value;
 
               // The auth fetch awaited — a replacement can land mid-await.
               // Re-verify before opening the delegated stream.
@@ -623,6 +658,23 @@ export const registerRouterProvider = (
               const apiKey = auth.apiKey;
               const headers = auth.headers;
 
+              // (e) per-candidate kill switch — declarations live outside the
+              // sibling try/finally so the finally can detach the listener.
+              // On stall we abort this controller to error the in-flight
+              // SSE read. Compose the run signal + kill switch manually —
+              // pi-ai ships combineAbortSignals in dist/utils but does NOT
+              // re-export it (blocked by the package exports map).
+              const candidateAbort = new AbortController();
+              const runSignal = options?.signal;
+              const propagateAbort = () =>
+                candidateAbort.abort(runSignal?.reason);
+              if (runSignal?.aborted) {
+                candidateAbort.abort();
+              } else if (runSignal) {
+                runSignal.addEventListener('abort', propagateAbort, {
+                  once: true,
+                });
+              }
               try {
                 let effectiveContext = context;
                 const targetLimit = resolveContextWindow(
@@ -686,12 +738,14 @@ export const registerRouterProvider = (
                   !hasCompatApi && runtimeStreamSimple
                     ? runtimeStreamSimple(targetModel, effectiveContext, {
                         ...delegationOptions,
+                        signal: candidateAbort.signal,
                         ...(delegatedReasoning
                           ? { reasoning: delegatedReasoning }
                           : {}),
                       })
                     : streamSimple(targetModel, effectiveContext, {
                         ...delegationOptions,
+                        signal: candidateAbort.signal,
                         apiKey,
                         headers,
                         ...(delegatedReasoning
@@ -700,7 +754,13 @@ export const registerRouterProvider = (
                       });
 
                 let contentReceived = false;
-                for await (const event of delegatedStream) {
+                for await (const event of stallGuardedStream(
+                  delegatedStream,
+                  stallTimeoutMs,
+                  () => candidateAbort.abort(),
+                  candidateAbort.signal,
+                  modelRef,
+                )) {
                   if (event.type === 'done') {
                     state.accumulatedCost +=
                       event.message.usage?.cost?.total ?? 0;
@@ -774,9 +834,20 @@ export const registerRouterProvider = (
                 ) {
                   actions.updateStatus(state.lastExtensionContext);
                 }
+                if (stallFallbacks.length > 0) {
+                  decision.reasoning =
+                    `Recovered from ${stallFallbacks.length} stall(s): ${stallFallbacks.join('; ')}. ` +
+                    `(Original: ${decision.reasoning})`;
+                }
                 break outer;
               } catch (err) {
                 lastError = err;
+                if (isStallTimeoutError(err)) {
+                  stallFallbacks.push(err.message);
+                  notifyStall(err.message);
+                }
+              } finally {
+                runSignal?.removeEventListener('abort', propagateAbort);
               }
             }
           }

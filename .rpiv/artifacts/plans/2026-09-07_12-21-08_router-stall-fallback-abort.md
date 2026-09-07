@@ -866,11 +866,11 @@ import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAULT_STALL_TIMEOUT_MS } 
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Stall tests pass: `npx vitest run extensions/provider.test.ts -t "stall"`
-- [ ] Full provider suite: `npx vitest run extensions/provider.test.ts`
-- [ ] Type check: `npm run tsc`
-- [ ] Kill switch wired: `grep -c "candidateAbort" extensions/provider.ts` returns >= 5
-- [ ] Full suite green: `npx vitest run`
+- [x] Stall tests pass: `npx vitest run extensions/provider.test.ts -t "stall"`
+- [x] Full provider suite: `npx vitest run extensions/provider.test.ts`
+- [x] Type check: `npm run tsc`
+- [x] Kill switch wired: `grep -c "candidateAbort" extensions/provider.ts` returns >= 5
+- [x] Full suite green: `npx vitest run`
 
 #### Manual Verification:
 - [ ] Live: point a profile at a stalling endpoint (accept-and-never-respond listener) — the turn falls back within `stallTimeoutMs` with a warning line; Esc during the stall aborts immediately

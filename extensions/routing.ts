@@ -715,7 +715,9 @@ export const createStallTimeoutError = (
   return error;
 };
 
-export const isStallTimeoutError = (error: unknown): boolean =>
+export const isStallTimeoutError = (
+  error: unknown,
+): error is Error =>
   error instanceof Error && error.name === 'StallTimeoutError';
 
 /**

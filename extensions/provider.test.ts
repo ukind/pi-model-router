@@ -1313,6 +1313,119 @@ describe('provider.ts', () => {
       expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
       expect(mockActions.persistState).toHaveBeenCalled();
     });
+
+    it('should fall back when the delegated stream stalls silently', async () => {
+      mockState.lastExtensionContext.ui.notify = vi.fn();
+      mockState.currentConfig.stallTimeoutMs = 20;
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      const attempts: string[] = [];
+      vi.mocked(streamSimple).mockImplementation(((model: any) => {
+        attempts.push(model.id);
+        if (model.id === 'gpt-4o-mini') {
+          // Primary streams nothing — pure silence.
+          return (async function* () {
+            await new Promise<void>(() => {});
+          })() as any;
+        }
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'fallback answer' };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.001 } } },
+          };
+        })() as any;
+      }) as any);
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(150);
+
+      expect(attempts).toEqual(['gpt-4o-mini', 'gemini-1.5-flash']);
+      expect(mockState.lastDecision.isFallback).toBe(true);
+      expect(mockState.lastDecision.reasoning).toContain('stalled');
+      expect(mockState.lastExtensionContext.ui.notify).toHaveBeenCalled();
+    });
+
+    it('should fall back when the auth fetch stalls', async () => {
+      mockState.lastExtensionContext.ui.notify = vi.fn();
+      mockState.currentConfig.stallTimeoutMs = 20;
+      let authCalls = 0;
+      mockState.currentModelRegistry.getApiKeyAndHeaders = async () => {
+        authCalls++;
+        if (authCalls === 1) {
+          // First candidate's auth hangs — never resolves, never rejects.
+          await new Promise<void>(() => {});
+        }
+        return { ok: true, apiKey: 'key', headers: {} };
+      };
+      // NO AbortController — an aborted signal would take the silent-exit
+      // branch instead of fallback (discriminator).
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      vi.mocked(streamSimple).mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'fallback answer' };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.001 } } },
+          };
+        })() as any,
+      );
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(150);
+
+      expect(authCalls).toBeGreaterThanOrEqual(2);
+      expect(mockState.lastDecision.isFallback).toBe(true);
+      expect(mockState.lastExtensionContext.ui.notify).toHaveBeenCalled();
+    });
+
+    it('should abort (not fall back) when the signal fires during a stalled stream', async () => {
+      const controller = new AbortController();
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      mockState.lastExtensionContext.ui.notify = vi.fn();
+      const attempts: string[] = [];
+      vi.mocked(streamSimple).mockImplementation(((model: any) => {
+        attempts.push(model.id);
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'partial' };
+          await new Promise<void>(() => {}); // silence
+        })() as any;
+      }) as any);
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext(), {
+        signal: controller.signal,
+      } as any);
+      await sleep(50);
+      controller.abort();
+      await sleep(100);
+
+      expect(attempts).toEqual(['gpt-4o-mini']);
+      const terminalEvent = stream.events.find((e: any) => e.type === 'error');
+      expect(terminalEvent).toBeDefined();
+      expect(terminalEvent.reason).toBe('aborted');
+      expect(mockState.lastExtensionContext.ui.notify).not.toHaveBeenCalled();
+    });
   });
   });
 });
