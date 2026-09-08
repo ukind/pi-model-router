@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { registerRouterProvider, createErrorMessage } from './provider';
+import {
+  registerRouterProvider,
+  createErrorMessage,
+  modelRegistryFallback,
+} from './provider';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
 import type { RouterConfig, RoutingDecision } from './types';
@@ -49,6 +53,7 @@ vi.mock('@earendil-works/pi-ai/compat', () => ({
 
 describe('provider.ts', () => {
   let mockPi: any;
+  let mockRegistry: any;
   let mockState: any;
   let mockActions: any;
   let registeredProviderName: string | null = null;
@@ -57,6 +62,7 @@ describe('provider.ts', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     registeredProviderName = null;
+    modelRegistryFallback.current = undefined;
     registeredProviderOptions = null;
 
     mockPi = {
@@ -79,7 +85,7 @@ describe('provider.ts', () => {
       },
     };
 
-    const mockRegistry = {
+    mockRegistry = {
       find: (provider: string, modelId: string) => {
         if (provider === 'openai' || provider === 'google') {
           return { provider, id: modelId, input: ['text', 'image'] };
@@ -811,6 +817,51 @@ describe('provider.ts', () => {
       // Guard fires before any state exists — nothing meaningful to persist
       // (L1-03: no garbage router-state entry on the failure path).
       expect(mockActions.persistState).not.toHaveBeenCalled();
+    });
+
+    it('should recover via module fallback when the closure never captured a registry', async () => {
+      // Simulate a captureCtx from ANOTHER closure instance of the same
+      // module (factory re-execution): module fallback set, this closure's
+      // registry undefined.
+      modelRegistryFallback.current = mockRegistry;
+      mockState.currentModelRegistry = undefined;
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      vi.mocked(streamSimple).mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'fallback registry answer' };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.001 } } },
+          };
+        })() as any,
+      );
+
+      const model = {
+        id: 'balanced',
+        api: 'router-api',
+        provider: 'router',
+      } as any;
+      const context = {
+        messages: [{ role: 'user', content: 'hello' }],
+      } as any;
+
+      registeredProviderOptions.streamSimple(model, context);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Guard recovered: delegation ran and the closure state was healed
+      // (write-back through the state bag's new setter in production; plain
+      // property here).
+      expect(vi.mocked(streamSimple)).toHaveBeenCalled();
+      expect(mockState.selectedProfile).toBe('balanced');
+      expect(mockState.currentModelRegistry).toBe(mockRegistry);
+      const errorEvent = stream.events.find((e: any) => e.type === 'error');
+      expect(errorEvent).toBeUndefined();
     });
 
     it('should push error event when profile is unknown', async () => {

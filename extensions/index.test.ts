@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { modelRegistryFallback } from './provider';
 import routerExtension from './index';
 
 vi.mock('./config', () => ({
@@ -63,6 +64,7 @@ describe('index.ts (orchestrator)', () => {
         eventListeners[event].push(handler);
       }),
     };
+    modelRegistryFallback.current = undefined;
   });
 
   const buildMockCtx = () => ({
@@ -875,5 +877,52 @@ describe('index.ts (orchestrator)', () => {
       // No additional appendEntry calls on the second turn_end
       expect(callsAfterSecond).toBe(callsAfterFirst);
     });
+  });
+
+  it('should write the module fallback on a before_provider_request capture and not poison it on stale ctx', async () => {
+    routerExtension(mockPi);
+
+    const mockCtx = buildMockCtx();
+    const captureHandlers = eventListeners['before_provider_request'] || [];
+    for (const handler of captureHandlers) {
+      await handler({}, mockCtx);
+    }
+    expect(modelRegistryFallback.current).toBe(mockCtx.modelRegistry);
+
+    // Stale ctx after session replacement: ctx getters throw inside the try;
+    // the fallback must keep the last good value (write stays in the try).
+    const staleCtx = {
+      get modelRegistry() {
+        throw new Error(
+          'This extension ctx is stale after session replacement',
+        );
+      },
+      get cwd() {
+        throw new Error(
+          'This extension ctx is stale after session replacement',
+        );
+      },
+    };
+    for (const handler of captureHandlers) {
+      handler({}, staleCtx);
+    }
+    expect(modelRegistryFallback.current).toBe(mockCtx.modelRegistry);
+  });
+
+  it('should capture the registry on turn_start', async () => {
+    routerExtension(mockPi);
+
+    const turnStartHandlers = eventListeners['turn_start'] || [];
+    expect(turnStartHandlers.length).toBeGreaterThan(0);
+
+    // No session_start first: capture must land in a never-initialized closure.
+    const mockCtx = buildMockCtx();
+    for (const handler of turnStartHandlers) {
+      await handler(
+        { type: 'turn_start', turnIndex: 0, timestamp: Date.now() },
+        mockCtx,
+      );
+    }
+    expect(modelRegistryFallback.current).toBe(mockCtx.modelRegistry);
   });
 });

@@ -150,3 +150,12 @@ export interface CustomSessionEntry {
   customType?: string;
   data?: unknown;
 }
+
+export interface RouterDiagnosticEntry {
+  type: 'registry-guard';
+  provenance: 'none';
+  pid: number;
+  uptimeMs: number;
+  argvFlags: string;
+  detail: string;
+}

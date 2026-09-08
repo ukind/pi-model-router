@@ -33,7 +33,7 @@ import {
   formatUnsupportedThinkingWarning,
 } from './ui';
 import { registerCommands } from './commands';
-import { registerRouterProvider } from './provider';
+import { registerRouterProvider, modelRegistryFallback } from './provider';
 
 const routerExtension = (pi: ExtensionAPI) => {
   let currentConfig: RouterConfig = { profiles: {} };
@@ -67,17 +67,24 @@ const routerExtension = (pi: ExtensionAPI) => {
   // the delivered ExtensionContext. A delivered ctx goes stale after any
   // session replacement (pi invalidates captured runners on newSession /
   // fork / switchSession / reload), so this must run on EVERY event, above
-  // any behavioral early-return gates. `before_provider_request` is the
-  // contract anchor: pi emits it with a fresh ctx immediately before each
-  // provider request, which makes the provider's registry guard a true
-  // invariant instead of a session-start race. (Architecture review L0-01/
+  // any behavioral early-return gates. No pi event is guaranteed to precede
+  // a custom provider's own streamSimple — capture here is best-effort
+  // freshness; the provider's guard falls back to the module-level registry
+  // when a closure never received an event. (Architecture review L0-01/
   // L0-02/L0-04.)
   const captureCtx = (ctx: ExtensionContext) => {
     try {
       // A successful read below proves the ctx is alive — clear the flag.
       isExtensionContextDead = false;
       lastExtensionContext = ctx;
-      currentModelRegistry = ctx.modelRegistry;
+      // Read the getter once: a ctx that goes stale between two reads would
+      // otherwise populate closure state but not the module fallback.
+      const registry = ctx.modelRegistry;
+      currentModelRegistry = registry;
+      // Module-level fallback: survives closure re-execution over the cached
+      // module, so a fresh closure that never received an event can still
+      // resolve a registry at guard time.
+      modelRegistryFallback.current = registry;
       currentCwd = ctx.cwd;
     } catch {
       isExtensionContextDead = true;
@@ -314,14 +321,14 @@ const routerExtension = (pi: ExtensionAPI) => {
           get currentModelRegistry() {
             return currentModelRegistry;
           },
+          set currentModelRegistry(v) {
+            currentModelRegistry = v;
+          },
           get lastExtensionContext() {
             return lastExtensionContext;
           },
           get isExtensionContextDead() {
             return isExtensionContextDead;
-          },
-          get debugEnabled() {
-            return debugEnabled;
           },
           get selectedProfile() {
             return selectedProfile;
@@ -541,13 +548,25 @@ const routerExtension = (pi: ExtensionAPI) => {
     actions,
   );
 
-  // Capture contract anchor: pi's turn lifecycle emits
-  // before_provider_request → [provider request] with a fresh ctx in every
-  // mode (interactive/print/json/rpc), across session replacements. This
-  // guarantees streamSimple always sees a live model registry — including
-  // subagent child processes that race session_start with their first model
-  // call, and parents whose session was replaced mid-run. (L0-01.)
+  // Capture points: every handler below runs captureCtx first. No single
+  // event is guaranteed to precede the router's own streamSimple (compaction
+  // and branch-summary call the stream function directly; before_provider_request
+  // fires only inside the delegated inner request) — the provider's guard
+  // falls back to the module-level registry when this closure never received
+  // an event. (L0-01.)
   pi.on('before_provider_request', (_event, ctx) => {
+    captureCtx(ctx);
+  });
+
+  // turn_start fires through the runner at the start of every turn, before
+  // that turn's provider request (AgentSession._emitExtensionEvent →
+  // runner.emit → createContext, agent-session.js:367-374) — including sessions
+  // that never emitted session_start (reload without bindings). It is the
+  // strongest per-turn capture anchor: it makes the serving closure's registry
+  // exact instead of relying on the module fallback. Pure capture — no
+  // behavioral gating (contrast model_select, whose isInitialized early-return
+  // runs AFTER its captureCtx call; turn_start must not gate at all). (L0-01.)
+  pi.on('turn_start', (_event, ctx) => {
     captureCtx(ctx);
   });
 

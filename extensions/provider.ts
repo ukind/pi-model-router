@@ -21,6 +21,7 @@ import type {
   RouterPinByProfile,
   RouterThinkingByProfile,
   ClassifierResult,
+  RouterDiagnosticEntry,
 } from './types';
 import {
   profileNames,
@@ -55,6 +56,71 @@ import {
 // the visible error path (fails loud).
 const STALE_CTX_MESSAGE_PREFIX =
   'This extension ctx is stale after session replacement';
+
+
+// Module-level fallback registry. Pi caches the extension module per cwd
+// (loader.js extensionCache): a second session created in this process from
+// fresh services reuses the cached factory, producing a NEW closure over the
+// SAME module instance — that closure can reach streamSimple with no captured
+// registry, and this fallback covers it. In-process subagent sessions
+// (pi-subagents createAgentSession) hit exactly this window: every child
+// re-executes the factory and re-registers the provider into compat's
+// process-global api map, so a stream can dispatch to a fresh closure that
+// never received an extension event. /reload re-evaluates the module
+// (resource-loader clearExtensionCache), so reload windows are covered by
+// capture points (turn_start/session_start) instead; whatever remains is
+// diagnosable via the guard diagnostic.
+export const modelRegistryFallback: {
+  current: ExtensionContext['modelRegistry'] | undefined;
+} = { current: undefined };
+
+const moduleLoadTimeMs = Date.now();
+
+// Guard diagnostics: recovery (module fallback saved the stream) logs one
+// deduped stderr line per module instance — frequent in aliased-closure
+// windows, and the field signal that identifies which window fired. Failure
+// (no capture anywhere in this module instance) also persists a
+// `router-diagnostic` session entry via pi.appendEntry, which works without
+// an extension ctx. Window discrimination at failure time: pid (parent vs
+// child process), uptimeMs (near-zero = first-call window; large =
+// partial-load), argvFlags (TUI vs print-mode flags — flags only, so no user
+// prompt text is persisted; mode itself is unknowable without an extension
+// ctx). (Architecture review L0-01.)
+const loggedGuardRecovery = { moduleFallback: false };
+const logGuardRecovery = () => {
+  if (loggedGuardRecovery.moduleFallback) return;
+  loggedGuardRecovery.moduleFallback = true;
+  console.error(
+    `[pi-model-router] registry guard: recovered via module fallback ` +
+      `(pid=${process.pid}, uptimeMs=${Date.now() - moduleLoadTimeMs}). ` +
+      `The serving closure never received an extension event; ` +
+      `a prior closure's capture supplied the registry.`,
+  );
+};
+const logGuardFailure = (pi: ExtensionAPI, detail: string) => {
+  const diagnostic: RouterDiagnosticEntry = {
+    type: 'registry-guard',
+    provenance: 'none',
+    pid: process.pid,
+    uptimeMs: Date.now() - moduleLoadTimeMs,
+    argvFlags: process.argv
+      .slice(2)
+      .filter((arg) => arg.startsWith('-'))
+      .join(' ')
+      .slice(0, 120),
+    detail,
+  };
+  console.error(
+    `[pi-model-router] registry guard FAILED: no closure capture and no ` +
+      `module fallback (pid=${diagnostic.pid}, uptimeMs=${diagnostic.uptimeMs}, ` +
+      `argvFlags=${diagnostic.argvFlags}, ${diagnostic.detail})`,
+  );
+  try {
+    pi.appendEntry('router-diagnostic', diagnostic);
+  } catch {
+    // ponytail: appendEntry unavailable (pre-bind runtime) — stderr is the trace.
+  }
+};
 
 export const createErrorMessage = (
   model: Model<Api>,
@@ -214,9 +280,7 @@ export const registerRouterProvider = (
   state: {
     lastRegisteredModels: string;
     readonly currentConfig: RouterConfig;
-    readonly currentModelRegistry:
-      | ExtensionContext['modelRegistry']
-      | undefined;
+    currentModelRegistry: ExtensionContext['modelRegistry'] | undefined;
     readonly lastExtensionContext: ExtensionContext | undefined;
     readonly isExtensionContextDead: boolean;
     selectedProfile: string | undefined;
@@ -330,13 +394,20 @@ export const registerRouterProvider = (
     ): AssistantMessageEventStream {
       const stream = createAssistantMessageEventStream();
 
-      // Invariant guard: pi emits `before_provider_request` with a fresh ctx
-      // before every provider request (the router extension re-captures there),
-      // so the registry is guaranteed set by the time streamSimple runs.
-      // If this fires, the capture contract broke — fail loudly WITHOUT
-      // persisting state (nothing meaningful exists to persist). (L1-01,
-      // L1-03.)
-      if (!state.currentModelRegistry) {
+      // Registry guard. No pi event is guaranteed to precede a custom
+      // provider's own streamSimple: before_provider_request fires from
+      // onPayload inside the delegated inner request (after this guard), and
+      // session_start is delivered by bindExtensions or a bindings-present
+      // reload — paths that skip or delay both leave the closure uncaptured.
+      // Resolution order: this closure's capture, else the module fallback
+      // (written by any closure's captureCtx — survives closure re-execution
+      // on the cached module), written back so every later consumer in this
+      // stream (image filters, resolveContextWindow, find/auth) sees it.
+      // Both undefined = no capture ever happened in this module instance —
+      // fail loudly WITHOUT persisting state (nothing meaningful exists to
+      // persist) and record a `router-diagnostic` entry. (L1-01/L1-03/L0-01.)
+      if (!state.currentModelRegistry && !modelRegistryFallback.current) {
+        logGuardFailure(pi, `api=${model.api} profile=${model.id}`);
         stream.push({
           type: 'error',
           reason: 'error',
@@ -347,6 +418,10 @@ export const registerRouterProvider = (
         });
         stream.end();
         return stream;
+      }
+      if (!state.currentModelRegistry) {
+        state.currentModelRegistry = modelRegistryFallback.current;
+        logGuardRecovery();
       }
 
       (async () => {
