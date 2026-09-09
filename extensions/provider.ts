@@ -58,6 +58,170 @@ const STALE_CTX_MESSAGE_PREFIX =
   'This extension ctx is stale after session replacement';
 
 
+// ---------------------------------------------------------------------------
+// Cross-session closure dispatcher (phantom-abort fix, 2026-09-09).
+//
+// Root cause it fixes: pi-ai compat's apiProviderRegistry is a PROCESS-GLOBAL
+// map keyed by api id — `registerApiProvider` does `set(api, ...)` so the LAST
+// registration wins for every session in the process. Every in-process
+// subagent session re-executes the factory (pi caches the extension module per
+// cwd) and re-registers 'router-local-api', so after any subagent spawn the
+// child's closure served ALL router streams — including the parent session's.
+// When pi-subagents' 10-minute cleanup timer evicted the child
+// (AgentManager.cleanup → shutdownChildSession → session_shutdown), the child
+// closure flipped its dead flag and the parent's in-flight turn hit the
+// dead-ctx choke, which fabricated a USER-ABORT terminal (stopReason
+// 'aborted' → pi UI renders "Operation aborted") with no Esc pressed. The five
+// turns before it were also corrupted: silently routed by the child's stale
+// state (tier low/flash, decisions persisted into the child's session file).
+//
+// Fix: register ONE stable module-level dispatcher as the compat streamSimple
+// (re-registration overwrites it with an equivalent function — harmless), and
+// have it resolve the serving closure per call. Every closure registers a
+// handle; captureCtx (any event, on the CALLING session's runner) bumps the
+// handle's capture sequence, so at dispatch time the freshest-live handle IS
+// the calling session's closure — turn_start precedes the provider request on
+// every turn (pi core agent-session.js:367-374).
+//
+// ponytail ceiling: with N agents turning CONCURRENTLY, a sibling's turn_start
+// can land between this session's capture and its dispatch, so freshest-live
+// can pick the sibling's closure. Consequence is degraded state attribution
+// only — the dead-flag choke below is signal-only, so no cross-pick can ever
+// fabricate an abort. True session-scoped dispatch needs a pi-core change
+// (compat's registry is keyed by api id, not session).
+// ---------------------------------------------------------------------------
+
+const closureHandles = new Set<RouterClosureHandle>();
+
+interface RouterClosureHandle {
+  /** The per-closure streamSimple built by this factory run. */
+  stream: (
+    model: Model<Api>,
+    context: Context,
+    options?: SimpleStreamOptions,
+  ) => AssistantMessageEventStream;
+  /** Bumped by captureCtx on the owning session's every extension event. */
+  captureSeq: number;
+  /** session_shutdown fired on the owning session — removed from the set. */
+  dead: boolean;
+  /** For forensics: distinguishes closures in stderr/diagnostics. */
+  label: string;
+}
+
+// One handle per factory run (per session that loaded this module), keyed by
+// the per-instance ExtensionAPI object — stable for the closure's lifetime,
+// rebuilt state bags are not. actions.registerRouterProvider() runs multiple
+// times per closure (reloadConfig, switchToRouterProfile) and must reuse it.
+const handleByPi = new WeakMap<ExtensionAPI, RouterClosureHandle>();
+
+const bumpClosureCapture = (pi: ExtensionAPI): void => {
+  const handle = handleByPi.get(pi);
+  if (handle) handle.captureSeq = ++closureCaptureSeq;
+};
+
+const markClosureDead = (pi: ExtensionAPI): void => {
+  const handle = handleByPi.get(pi);
+  if (!handle) return;
+  handle.dead = true;
+  closureHandles.delete(handle);
+};
+let closureCaptureSeq = 0;
+let closureFactorySeq = 0;
+const MAX_CLOSURE_HANDLES = 8;
+
+
+type DispatchProvenance = 'closure:fresh' | 'closure:live-fallback' | 'closure:dead-fallback';
+
+const pickClosureHandle = (): { handle: RouterClosureHandle; provenance: DispatchProvenance } | undefined => {
+  let freshestLive: RouterClosureHandle | undefined;
+  let anyLive: RouterClosureHandle | undefined;
+  let mostRecentAny: RouterClosureHandle | undefined;
+  for (const handle of closureHandles) {
+    if (!mostRecentAny || handle.captureSeq > mostRecentAny.captureSeq) mostRecentAny = handle;
+    if (handle.dead) continue;
+    if (!anyLive) anyLive = handle;
+    if (!freshestLive || handle.captureSeq > freshestLive.captureSeq) freshestLive = handle;
+  }
+  if (freshestLive) return { handle: freshestLive, provenance: 'closure:fresh' };
+  if (anyLive) return { handle: anyLive, provenance: 'closure:live-fallback' };
+  // Dead closure as last resort is safe: every ctx read in the stream path is
+  // dead-guarded and persistState is try/catch — it streams end-to-end with
+  // state writes no-oping. Availability beats a fabricated abort.
+  if (mostRecentAny) return { handle: mostRecentAny, provenance: 'closure:dead-fallback' };
+  return undefined;
+};
+
+let loggedDispatchProvenance = { last: '' };
+const logDispatchProvenance = (provenance: DispatchProvenance, detail: string) => {
+  // One deduped stderr line per distinct provenance class per module instance.
+  // Frequent fresh picks stay silent; the degraded classes are the field signal.
+  if (loggedDispatchProvenance.last === provenance) return;
+  loggedDispatchProvenance.last = provenance;
+  if (provenance === 'closure:fresh') return;
+  console.error(`[pi-model-router] closure dispatcher: ${provenance} (${detail})`);
+};
+
+const dispatchRouterStream = (
+  model: Model<Api>,
+  context: Context,
+  options?: SimpleStreamOptions,
+): AssistantMessageEventStream => {
+  const picked = pickClosureHandle();
+  if (!picked) {
+    // Defensive: unreachable while the module that defines this dispatcher has
+    // ever created a closure, and set-bounding drops only dead handles whose
+    // replacement closure has already registered. Fail loud, never as abort.
+    const stream = createAssistantMessageEventStream();
+    stream.push({
+      type: 'error',
+      reason: 'error',
+      error: createErrorMessage(
+        model,
+        'Router provider has no session closure to serve this stream (all closures dead and none retained). This is a router extension bug — please report it.',
+      ),
+    });
+    stream.end();
+    return stream;
+  }
+  logDispatchProvenance(picked.provenance, `${picked.handle.label}`);
+  return picked.handle.stream(model, context, options);
+};
+
+const ensureClosureHandle = (
+  pi: ExtensionAPI,
+  stream: RouterClosureHandle['stream'],
+  label: string,
+): RouterClosureHandle => {
+  let handle = handleByPi.get(pi);
+  if (handle) {
+    // actions.registerRouterProvider() re-runs per closure (reloadConfig,
+    // switchToRouterProfile) — refresh the stream so a rebuilt state bag is
+    // not served through a stale pre-reload one.
+    handle.stream = stream;
+    return handle;
+  }
+  handle = { stream, captureSeq: ++closureCaptureSeq, dead: false, label };
+  handleByPi.set(pi, handle);
+  closureHandles.add(handle);
+  // Bound the set: reload/subagent churn can leave handles whose sessions were
+  // torn down without an emitted shutdown. Drop dead ones beyond the cap —
+  // a live handle is always kept.
+  if (closureHandles.size > MAX_CLOSURE_HANDLES) {
+    const dead = [...closureHandles].filter((h) => h.dead);
+    while (dead.length > 0 && closureHandles.size > MAX_CLOSURE_HANDLES) {
+      closureHandles.delete(dead.pop()!);
+    }
+  }
+  return handle;
+};
+
+// Exported for index.ts: captureCtx calls this on EVERY delivered event so the
+// calling session's closure is the freshest at dispatch time (turn_start
+// precedes the provider request on every turn). session_shutdown calls the
+// death marker so an evicted subagent's closure is never picked again.
+export const notifyClosureCapture = bumpClosureCapture;
+export const notifyClosureShutdown = markClosureDead;
+
 // Module-level fallback registry. Pi caches the extension module per cwd
 // (loader.js extensionCache): a second session created in this process from
 // fresh services reuses the cached factory, producing a NEW closure over the
@@ -382,16 +546,11 @@ export const registerRouterProvider = (
     .join(',');
   if (state.lastRegisteredModels === modelsKey) return;
 
-  pi.registerProvider('router', {
-    baseUrl: 'router://local',
-    apiKey: 'pi-model-router',
-    api: 'router-local-api',
-    models: modelDefinitions,
-    streamSimple(
-      model: Model<Api>,
-      context: Context,
-      options?: SimpleStreamOptions,
-    ): AssistantMessageEventStream {
+  const closureStreamSimple = (
+    model: Model<Api>,
+    context: Context,
+    options?: SimpleStreamOptions,
+  ): AssistantMessageEventStream => {
       const stream = createAssistantMessageEventStream();
 
       // Registry guard. No pi event is guaranteed to precede a custom
@@ -481,10 +640,14 @@ export const registerRouterProvider = (
             );
           }
 
-          // The classifier await can span a session replacement. Re-verify
-          // liveness before any ctx-derived read below: direct return keeps
-          // the finally-running persistState and surfaces no error event.
-          if (state.isExtensionContextDead || options?.signal?.aborted) {
+          // The classifier await can span a user abort. Only the STREAM's OWN
+          // signal means "this turn is unwanted" — end as aborted then. A dead
+          // extension ctx alone must NOT fabricate a user abort: this closure
+          // may be serving another session's stream (in-process subagent
+          // eviction flips the dead flag mid-flight — the 2026-09-09 phantom
+          // "Operation aborted" bug). Dead-ctx effects (ui/persist) are
+          // already individually guarded below.
+          if (options?.signal?.aborted) {
             pushAbortedEnd(stream, model);
             return;
           }
@@ -674,9 +837,11 @@ export const registerRouterProvider = (
 
             for (let i = 0; i < modelsToTry.length; i++) {
               // Choke point: every tier transition and candidate retry
-              // re-enters this loop top. After a replacement kill (dead
-              // flag) or a user abort, stop the fallback chain silently.
-              if (state.isExtensionContextDead || options?.signal?.aborted) {
+              // re-enters this loop top. Only the stream's own signal (user
+              // Esc / pi aborting this turn) ends the chain as aborted — a
+              // dead extension ctx alone must not (see the classifier choke
+              // above: this closure may serve another session's stream).
+              if (options?.signal?.aborted) {
                 pushAbortedEnd(stream, model);
                 return;
               }
@@ -721,9 +886,11 @@ export const registerRouterProvider = (
               }
               const auth = authResult.value;
 
-              // The auth fetch awaited — a replacement can land mid-await.
-              // Re-verify before opening the delegated stream.
-              if (state.isExtensionContextDead || options?.signal?.aborted) {
+              // The auth fetch awaited — a user abort can land mid-await.
+              // Re-verify before opening the delegated stream. Signal-only:
+              // a dead ctx alone must not fabricate an abort (see the
+              // classifier choke above).
+              if (options?.signal?.aborted) {
                 pushAbortedEnd(stream, model);
                 return;
               }
@@ -950,16 +1117,21 @@ export const registerRouterProvider = (
 
           stream.end();
         } catch (error) {
-          // Benign termination: a session replacement killed this turn.
-          // Branch 1 — stale ctx throw: pi's exact prefix. Branch 2 —
-          // pi's abort: AbortError. Neither is a router failure, so both
-          // end with the aborted terminal event. Non-matching errors
-          // still surface.
+          // Terminal classification. The router may end a turn as 'aborted'
+          // ONLY when the stream's own run signal is aborted (user Esc / pi
+          // aborting THIS turn) — or on pi's stale-ctx throw (session already
+          // replaced; the turn is discarded either way). An AbortError from
+          // an inner stream while the run signal is live is a candidate
+          // failure like any other: it must surface as 'error', never
+          // masquerade as a user abort (2026-09-09 phantom "Operation
+          // aborted": parent turns served by an evicted subagent's closure).
           const isStaleCtx =
             error instanceof Error &&
             error.message.startsWith(STALE_CTX_MESSAGE_PREFIX);
           const isAborted =
-            error instanceof Error && error.name === 'AbortError';
+            error instanceof Error &&
+            error.name === 'AbortError' &&
+            Boolean(options?.signal?.aborted);
           if (!isStaleCtx && !isAborted) {
             stream.push({
               type: 'error',
@@ -983,7 +1155,24 @@ export const registerRouterProvider = (
       })();
 
       return stream;
-    },
+  };
+
+  // Register this closure into the module dispatcher BEFORE registering the
+  // provider: compat's entry is overwritten by every factory run (process-
+  // global map, last registration wins), and the stable dispatcher is what
+  // makes that overwrite harmless — it resolves the serving closure per call.
+  ensureClosureHandle(
+    pi,
+    closureStreamSimple,
+    `pid=${process.pid} closure#${++closureFactorySeq}`,
+  );
+  pi.registerProvider('router', {
+    baseUrl: 'router://local',
+    apiKey: 'pi-model-router',
+    api: 'router-local-api',
+    models: modelDefinitions,
+    // Stable module-level dispatcher — same behavior on every registration.
+    streamSimple: dispatchRouterStream,
   });
 
   state.lastRegisteredModels = modelsKey;

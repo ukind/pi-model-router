@@ -33,7 +33,12 @@ import {
   formatUnsupportedThinkingWarning,
 } from './ui';
 import { registerCommands } from './commands';
-import { registerRouterProvider, modelRegistryFallback } from './provider';
+import {
+  registerRouterProvider,
+  modelRegistryFallback,
+  notifyClosureCapture,
+  notifyClosureShutdown,
+} from './provider';
 
 const routerExtension = (pi: ExtensionAPI) => {
   let currentConfig: RouterConfig = { profiles: {} };
@@ -86,6 +91,12 @@ const routerExtension = (pi: ExtensionAPI) => {
       // resolve a registry at guard time.
       modelRegistryFallback.current = registry;
       currentCwd = ctx.cwd;
+      // Closure dispatcher: mark THIS session's closure as the freshest, so
+      // the next router stream dispatch (this turn's provider request —
+      // turn_start precedes it on every turn) resolves to it instead of a
+      // sibling in-process subagent closure that re-registered the provider
+      // later. (2026-09-09 phantom-abort fix.)
+      notifyClosureCapture(pi);
     } catch {
       isExtensionContextDead = true;
       // Stale ctx after session replacement — ctx getters throw. Keep the
@@ -577,6 +588,11 @@ const routerExtension = (pi: ExtensionAPI) => {
   // registering here activates the path.
   pi.on('session_shutdown', () => {
     isExtensionContextDead = true;
+    // Remove this closure from the module dispatcher so later router streams
+    // (from OTHER sessions still alive in this process — e.g. the parent
+    // after an in-process subagent is evicted by pi-subagents' 10-minute
+    // cleanup timer) never resolve to a dead closure again.
+    notifyClosureShutdown(pi);
   });
 
   pi.on('session_start', async (_event, ctx) => {

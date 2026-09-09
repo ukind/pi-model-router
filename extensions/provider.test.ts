@@ -3,6 +3,7 @@ import {
   registerRouterProvider,
   createErrorMessage,
   modelRegistryFallback,
+  notifyClosureShutdown,
 } from './provider';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
@@ -1059,15 +1060,15 @@ describe('provider.ts', () => {
     const makeContext = () =>
       ({ messages: [{ role: 'user', content: 'hello' }] }) as any;
 
-    it('should end a mid-turn replacement silently and stop fallback retries', async () => {
+    it('should retry the fallback chain and surface error (not fabricated abort) when the inner stream aborts with a live run signal', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
       const stream = new MockEventStream();
       vi.mocked(createAssistantMessageEventStream).mockReturnValue(
         stream as any,
       );
 
-      // Deferred gate (the suite's one new construct): the delegated stream
-      // blocks mid-stream until the test simulates the replacement kill.
+      // Deferred gate: the delegated stream blocks mid-stream until the test
+      // simulates the kill.
       let releaseDelegated = () => {};
       const midStreamGate = new Promise<void>((resolve) => {
         releaseDelegated = resolve;
@@ -1079,33 +1080,38 @@ describe('provider.ts', () => {
         return (async function* () {
           yield { type: 'text_delta', delta: 'partial' };
           await midStreamGate;
-          // pi aborts the underlying provider stream on session replacement.
           const abortError = new Error('The operation was aborted');
           abortError.name = 'AbortError';
           throw abortError;
         })() as any;
       }) as any);
 
-      // Pin medium: [gpt-4o-mini, gemini-1.5-flash] — the retry that must
-      // NOT happen after the kill.
+      // Pin medium: [gpt-4o-mini, gemini-1.5-flash] + cross-tier [gpt-4o].
       mockState.pinnedTierByProfile['balanced'] = 'medium';
 
       registeredProviderOptions.streamSimple(makeModel(), makeContext());
       await sleep(50);
       expect(attempts).toEqual(['gpt-4o-mini']);
 
-      // Session replacement: session_shutdown fired (flag set, Slice 1) and
-      // the underlying stream aborted.
+      // The session dies AND the underlying stream aborts — but the run
+      // signal stays live (no user Esc, no pi abort of THIS turn). New
+      // contract (2026-09-09 phantom-abort fix): a dead ctx alone must not
+      // fabricate a user abort. The AbortError is a candidate failure —
+      // the chain retries, then ends as a visible error.
       mockState.isExtensionContextDead = true;
       releaseDelegated();
-      await sleep(100);
+      await sleep(150);
 
-      // Aborted terminal event: no fallback retry, state persisted.
       const terminalEvent = stream.events.find((e: any) => e.type === 'error');
       expect(terminalEvent).toBeDefined();
-      expect(terminalEvent.reason).toBe('aborted');
-      expect(terminalEvent.error.stopReason).toBe('aborted');
-      expect(attempts).toEqual(['gpt-4o-mini']);
+      expect(terminalEvent.reason).toBe('error');
+      expect(terminalEvent.error.stopReason).toBe('error');
+      expect(terminalEvent.error.errorMessage).toContain('aborted');
+      expect(attempts).toEqual([
+        'gpt-4o-mini',
+        'gemini-1.5-flash',
+        'gpt-4o',
+      ]);
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
@@ -1155,7 +1161,7 @@ describe('provider.ts', () => {
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
-    it('should exit silently when the session dies during the auth await', async () => {
+    it('should proceed to delegation when the session dies during the auth await (live signal)', async () => {
       let releaseAuth = () => {};
       const authGate = new Promise<void>((resolve) => {
         releaseAuth = resolve;
@@ -1172,7 +1178,11 @@ describe('provider.ts', () => {
       );
       vi.mocked(streamSimple).mockReturnValue(
         (async function* () {
-          yield { type: 'text_delta', delta: 'never reached' };
+          yield { type: 'text_delta', delta: 'answer' };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.0001 } } },
+          };
         })() as any,
       );
 
@@ -1181,17 +1191,16 @@ describe('provider.ts', () => {
       registeredProviderOptions.streamSimple(makeModel(), makeContext());
       await sleep(50);
 
-      // Replacement lands while the auth fetch is in flight.
+      // The owning session dies while the auth fetch is in flight — but the
+      // run signal stays live. New contract: no fabricated abort; the turn
+      // is still wanted, so delegation opens and completes.
       mockState.isExtensionContextDead = true;
       releaseAuth();
-      await sleep(100);
+      await sleep(150);
 
-      // Post-auth gate fired: no delegated stream opened, aborted end.
-      expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
-      const terminalEvent = stream.events.find((e: any) => e.type === 'error');
-      expect(terminalEvent).toBeDefined();
-      expect(terminalEvent.reason).toBe('aborted');
-      expect(terminalEvent.error.stopReason).toBe('aborted');
+      expect(vi.mocked(streamSimple)).toHaveBeenCalled();
+      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      expect(mockActions.recordDebugDecision).toHaveBeenCalled();
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
@@ -1291,10 +1300,9 @@ describe('provider.ts', () => {
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
-    it('should exit silently when the session dies during the classifier await', async () => {
+    it('should proceed to delegation when the session dies during the classifier await (live signal)', async () => {
       // No pin + a configured classifier: the classifier call flows through
-      // the mocked compat streamSimple (routing.ts:746) — the same
-      // deferred-gate construct, no new mock surface.
+      // the mocked compat streamSimple (routing.ts:746).
       mockState.currentConfig.classifierModel = {
         model: 'openai/gpt-4o-mini',
         thinking: 'low',
@@ -1318,6 +1326,10 @@ describe('provider.ts', () => {
           yield { type: 'text_delta', delta: 'medium' };
           await classifierGate;
           yield { type: 'text_delta', delta: 'medium' };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.0001 } } },
+          };
         })() as any;
       }) as any);
 
@@ -1325,23 +1337,29 @@ describe('provider.ts', () => {
       await sleep(50);
       expect(attempts).toEqual(['gpt-4o-mini']); // classifier call in flight
 
-      // Replacement lands mid-classifier.
+      // The owning session dies mid-classifier — run signal stays live.
+      // This is the exact 2026-09-09 phantom-abort shape: pi-subagents
+      // evicted the subagent whose closure was (then) serving this stream.
+      // New contract: no fabricated abort; delegation opens and completes.
       mockState.isExtensionContextDead = true;
       releaseClassifier();
-      await sleep(100);
+      await sleep(150);
 
-      // Post-classifier gate fired: aborted end, no delegated stream opened.
-      const terminalEvent = stream.events.find((e: any) => e.type === 'error');
-      expect(terminalEvent).toBeDefined();
-      expect(terminalEvent.reason).toBe('aborted');
-      expect(terminalEvent.error.stopReason).toBe('aborted');
-      expect(attempts).toEqual(['gpt-4o-mini']);
+      // Classifier call + the delegated turn — the post-classifier choke
+      // no longer kills the chain on a dead ctx alone.
+      expect(attempts).toEqual(['gpt-4o-mini', 'gpt-4o-mini']);
+      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      expect(mockActions.recordDebugDecision).toHaveBeenCalled();
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
-    it('should classify pi abort (AbortError) as benign: aborted terminal event', async () => {
-      // AbortError thrown straight into the IIFE catch (not swallowed by
-      // the per-candidate catch) — proves the catch's second branch.
+    it('should surface an AbortError with a live run signal as error (no fabricated abort)', async () => {
+      // AbortError thrown straight into the IIFE catch with NO aborted run
+      // signal. Old contract classified it as a user abort — the exact
+      // fabrication vector behind the 2026-09-09 phantom "Operation
+      // aborted". New contract: without signal.aborted it is a visible
+      // error. (The real user-Esc path carries signal.aborted and is pinned
+      // by the abort-signal test above.)
       mockActions.syncPiThinkingLevel = vi.fn(() => {
         const abortError = new Error('The operation was aborted');
         abortError.name = 'AbortError';
@@ -1359,8 +1377,9 @@ describe('provider.ts', () => {
 
       const terminalEvent = stream.events.find((e: any) => e.type === 'error');
       expect(terminalEvent).toBeDefined();
-      expect(terminalEvent.reason).toBe('aborted');
-      expect(terminalEvent.error.stopReason).toBe('aborted');
+      expect(terminalEvent.reason).toBe('error');
+      expect(terminalEvent.error.stopReason).toBe('error');
+      expect(terminalEvent.error.errorMessage).toContain('aborted');
       expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
       expect(mockActions.persistState).toHaveBeenCalled();
     });
@@ -1527,5 +1546,162 @@ describe('provider.ts', () => {
       expect(mockActions.persistState).toHaveBeenCalled();
     });
   });
+
+  describe('cross-session closure dispatcher (2026-09-09 phantom-abort fix)', () => {
+    const sleep = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
+
+    const makeModel = () =>
+      ({ id: 'balanced', api: 'router-api', provider: 'router' }) as any;
+    const makeContext = () =>
+      ({ messages: [{ role: 'user', content: 'hello' }] }) as any;
+
+    // Two factory runs over the shared module (parent + in-process
+    // subagent), each with its own pi/state/actions — replaying the
+    // compat api-map last-registration-wins hijack.
+    const makeClosure = (tag: string) => {
+      const pi: any = {
+        registerProvider: vi.fn(),
+      };
+      const state: any = {
+        lastRegisteredModels: '',
+        currentConfig: {
+          profiles: {
+            balanced: {
+              medium: {
+                model: 'openai/gpt-4o-mini',
+                resolvedContextWindow: 5000,
+              },
+            },
+          },
+        },
+        currentModelRegistry: mockRegistry,
+        lastExtensionContext: {
+          ui: { setHiddenThinkingLabel: vi.fn() },
+        },
+        isExtensionContextDead: false,
+        selectedProfile: undefined,
+        routerEnabled: false,
+        lastDecision: undefined,
+        thinkingByProfile: {},
+        pinnedTierByProfile: {},
+        accumulatedCost: 0,
+      };
+      const actions: any = {
+        persistState: vi.fn(),
+        recordDebugDecision: vi.fn(),
+        getThinkingOverride: vi.fn(),
+        updateStatus: vi.fn(),
+        syncPiThinkingLevel: vi.fn(),
+      };
+      registerRouterProvider(pi, state, actions);
+      const options = pi.registerProvider.mock.calls[0][1];
+      return { tag, pi, state, actions, options };
+    };
+
+    it('should survive a subagent-closure eviction mid-turn: no fabricated abort (the 2026-09-09 session 01a08460 bug)', async () => {
+      const parent = makeClosure('parent');
+      const child = makeClosure('child'); // registered later — compat's last-wins
+
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      // The turn is dispatched (picks the freshest closure — the child, as
+      // compat did before the fix) and blocks mid-delegation.
+      let releaseDelegated = () => {};
+      const midStreamGate = new Promise<void>((resolve) => {
+        releaseDelegated = resolve;
+      });
+      vi.mocked(streamSimple).mockImplementation(
+        (() =>
+          (async function* () {
+            yield { type: 'text_delta', delta: 'partial' };
+            await midStreamGate;
+            yield {
+              type: 'done',
+              message: { usage: { cost: { total: 0.0002 } } },
+            };
+          })() as any) as any,
+      );
+
+      child.options.streamSimple(makeModel(), makeContext());
+      await sleep(50);
+
+      // pi-subagents' 10-minute cleanup timer evicts the completed
+      // subagent: session_shutdown lands on the child closure mid-turn.
+      notifyClosureShutdown(child.pi);
+      child.state.isExtensionContextDead = true;
+      releaseDelegated();
+      await sleep(150);
+
+      // The in-flight turn completes. No aborted terminal was fabricated.
+      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      expect(child.actions.recordDebugDecision).toHaveBeenCalled();
+      expect(child.actions.persistState).toHaveBeenCalled();
+    });
+
+    it('should reroute the next dispatch to the parent closure after the child session shuts down', async () => {
+      const parent = makeClosure('parent');
+      const child = makeClosure('child');
+
+      notifyClosureShutdown(child.pi); // eviction
+
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      vi.mocked(streamSimple).mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'from parent closure' };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.0001 } } },
+          };
+        })() as any,
+      );
+
+      // Any registered streamSimple is the same stable dispatcher — call
+      // the PARENT's captured options: it must resolve to the parent
+      // closure (the only live one), never to the dead child.
+      parent.options.streamSimple(makeModel(), makeContext());
+      await sleep(100);
+
+      expect(stream.events.find((e: any) => e.type === 'error')).toBeUndefined();
+      expect(parent.actions.recordDebugDecision).toHaveBeenCalled();
+      expect(child.actions.recordDebugDecision).not.toHaveBeenCalled();
+      expect(parent.actions.persistState).toHaveBeenCalled();
+    });
+
+    it('should prefer the freshest live closure at dispatch time (capture ordering)', async () => {
+      const parent = makeClosure('parent');
+      const child = makeClosure('child');
+
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      vi.mocked(streamSimple).mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'x' };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0 } } },
+          };
+        })() as any,
+      );
+
+      // Both closures' captured streamSimple are the same stable
+      // dispatcher. Registration order made the child fresher — a dispatch
+      // right now must serve the CHILD closure (matches the pre-fix
+      // hijack observable), and the child's state bag is the one mutated.
+      parent.options.streamSimple(makeModel(), makeContext());
+      await sleep(100);
+
+      expect(child.actions.recordDebugDecision).toHaveBeenCalled();
+      expect(parent.actions.recordDebugDecision).not.toHaveBeenCalled();
+    });
   });
+});
 });
