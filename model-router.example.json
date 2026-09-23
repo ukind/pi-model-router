@@ -1,6 +1,6 @@
 {
   "debug": false,
-  "classifierModel": "flash",
+  "classifierModel": { "backend": "typesafe", "model": "typesafe/jev-latest" },
   "phaseBias": 0.5,
   "maxSessionBudget": 1.0,
   "stallTimeoutMs": 90000,

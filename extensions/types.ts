@@ -21,8 +21,12 @@ export interface ModelDefinition {
   thinkingLevels?: ThinkingLevel[];
 }
 
+export type ClassifierBackend = 'chat' | 'typesafe';
+
 export interface ClassifierConfig {
   model: string;
+  /** Transport for the classifier call. The default is 'chat' (chat stream). */
+  backend?: ClassifierBackend;
   thinking?: ThinkingLevel;
   fallbacks?: string[];
 }

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   extractTextFromContent,
   getLastUserText,
@@ -17,12 +17,22 @@ import {
   raceStallTimeout,
   stallGuardedStream,
 } from './routing';
+import { readFileSync } from 'node:fs';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
 import type { Context, Message, UserMessage } from '@earendil-works/pi-ai';
 import type { RouterProfile, RoutingRule, ClassifierResult } from './types';
 
 vi.mock('@earendil-works/pi-ai/compat', () => ({
   streamSimple: vi.fn(),
+}));
+
+// The Jev key can come from a file in the agent dir. Stub the fs read, so the
+// harness stays hermetic on a machine that holds a real key file.
+vi.mock('node:fs', () => ({
+  existsSync: vi.fn(() => false),
+  readFileSync: vi.fn(() => {
+    throw new Error('ENOENT: typesafe_api_key');
+  }),
 }));
 
 describe('routing.ts', () => {
@@ -1113,6 +1123,175 @@ describe('routing.ts', () => {
       );
       expect(result).toBeUndefined();
       expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
+    });
+
+    describe('typesafe (Jev) backend', () => {
+      const typesafeContext: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: 'design the migration',
+            timestamp: Date.now(),
+          },
+        ],
+      };
+
+      const okBody = (choice: string, confidence: number) => ({
+        ok: true,
+        json: async () => ({
+          answers: { tier: { type: 'choice', choice, confidence } },
+        }),
+      });
+
+      const runJev = (refs: string[], signal?: AbortSignal) =>
+        runClassifier(
+          refs,
+          mockRegistry,
+          typesafeContext,
+          undefined,
+          undefined,
+          undefined,
+          signal,
+          undefined,
+          undefined,
+          'typesafe',
+        );
+
+      afterEach(() => {
+        vi.unstubAllGlobals();
+        vi.mocked(readFileSync).mockImplementation(() => {
+          throw new Error('ENOENT: typesafe_api_key');
+        });
+      });
+
+      it('maps a Jev choice answer to a router tier', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
+          okBody('high', 0.92),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        const result = await runJev(['typesafe/jev-latest']);
+        expect(result?.tier).toBe('high');
+        expect(result?.confidence).toBe('high');
+        expect(result?.failureReason).toBe('success');
+
+        const [url, init] = fetchMock.mock.calls[0];
+        expect(url).toBe('https://api.typesafe.ai/v1/systemone');
+        expect(init.method).toBe('POST');
+        const sent = JSON.parse(String(init.body));
+        expect(sent.model).toBe('jev-latest');
+        expect(sent.questions.tier.type).toBe('choice');
+      });
+
+      it('maps Jev confidence through the high/medium/low thresholds', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        const cases = [
+          [0.8, 'high'],
+          [0.79, 'medium'],
+          [0.5, 'medium'],
+          [0.2, 'low'],
+        ] as const;
+        for (const [confidence, expected] of cases) {
+          vi.stubGlobal(
+            'fetch',
+            vi.fn(async (_url: string, _init: RequestInit) =>
+              okBody('medium', confidence),
+            ),
+          );
+          const result = await runJev(['typesafe/jev-latest']);
+          expect(result?.confidence).toBe(expected);
+        }
+      });
+
+      it('returns undefined on a missing key, an unusable answer, or a failure', async () => {
+        const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
+          okBody('high', 0.9),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+        expect(await runJev(['typesafe/jev-latest'])).toBeUndefined();
+        expect(fetchMock).not.toHaveBeenCalled();
+
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (_url: string, _init: RequestInit) =>
+            okBody('gigantic', 0.9),
+          ),
+        );
+        expect(await runJev(['typesafe/jev-latest'])).toBeUndefined();
+
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (_url: string, _init: RequestInit) => ({
+            ok: false,
+            status: 401,
+            json: async () => ({}),
+          })),
+        );
+        expect(await runJev(['typesafe/jev-latest'])).toBeUndefined();
+
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (_url: string, _init: RequestInit) => {
+            throw new Error('network down');
+          }),
+        );
+        expect(await runJev(['typesafe/jev-latest'])).toBeUndefined();
+      });
+
+      it('skips a ref without a provider slash and tries the next ref', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
+          okBody('high', 0.9),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        const result = await runJev(['jev-latest', 'typesafe/jev-latest']);
+        expect(result?.tier).toBe('high');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+
+      it('returns undefined on an aborted signal without calling fetch', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
+          okBody('high', 0.9),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        const result = await runJev(
+          ['typesafe/jev-latest'],
+          AbortSignal.abort(),
+        );
+        expect(result).toBeUndefined();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it('reads the key from the agent dir key file', async () => {
+        vi.mocked(readFileSync).mockReturnValue('file-key\n');
+        const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
+          okBody('high', 0.9),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        const result = await runJev(['typesafe/jev-latest']);
+        expect(result?.tier).toBe('high');
+        const init = fetchMock.mock.calls[0][1] as RequestInit & {
+          headers: Record<string, string>;
+        };
+        expect(init.headers.Authorization).toBe('Bearer file-key');
+      });
+
+      it('returns undefined when the key file holds no key', async () => {
+        vi.mocked(readFileSync).mockReturnValue('\n');
+        const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
+          okBody('high', 0.9),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        expect(await runJev(['typesafe/jev-latest'])).toBeUndefined();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
     });
   });
 

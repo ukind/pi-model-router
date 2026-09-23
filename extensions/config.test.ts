@@ -628,5 +628,35 @@ describe('config.ts', () => {
       expect(warnings.length).toBe(1);
       expect(warnings[0]).toContain('missing the "model" field');
     });
+
+    it('should normalize a typesafe (Jev) classifier backend without warnings', () => {
+      const raw = {
+        profiles: {
+          balanced: { high: { model: 'openai/gpt-4o' } },
+        },
+        classifierModel: { backend: 'typesafe', model: 'typesafe/jev-latest' },
+      };
+      const { config, warnings } = normalizeConfig(
+        raw as unknown as RouterConfig,
+      );
+      expect(config.classifierModel?.backend).toBe('typesafe');
+      expect(config.classifierModel?.model).toBe('typesafe/jev-latest');
+      expect(warnings).toEqual([]);
+    });
+
+    it('should warn and ignore an unknown classifier backend', () => {
+      const raw = {
+        profiles: {
+          balanced: { high: { model: 'openai/gpt-4o' } },
+        },
+        classifierModel: { backend: 'watson', model: 'openai/gpt-4o' },
+      };
+      const { config, warnings } = normalizeConfig(
+        raw as unknown as RouterConfig,
+      );
+      expect(config.classifierModel?.backend).toBeUndefined();
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain('invalid backend');
+    });
   });
 });

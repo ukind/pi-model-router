@@ -511,8 +511,22 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
           }
           if (classifierFallbacks.length === 0) classifierFallbacks = undefined;
         }
+        // Backend selector. An unknown value warns and falls back to the chat
+        // transport, the same rule the thinking level uses above.
+        const backend =
+          rawClassifier.backend === 'typesafe' ? 'typesafe' : undefined;
+        if (
+          rawClassifier.backend !== undefined &&
+          rawClassifier.backend !== 'chat' &&
+          rawClassifier.backend !== 'typesafe'
+        ) {
+          warnings.push(
+            `classifierModel has invalid backend "${String(rawClassifier.backend)}". Ignored.`,
+          );
+        }
         classifierModel = {
           model: resolved.canonicalRef,
+          backend,
           thinking,
           fallbacks: classifierFallbacks,
         };

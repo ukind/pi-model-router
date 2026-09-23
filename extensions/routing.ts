@@ -3,6 +3,7 @@ import type { Context, Message } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type {
+  ClassifierBackend,
   RouterTier,
   RouterPhase,
   RouterProfile,
@@ -16,6 +17,7 @@ import type {
 } from './types';
 import { parseCanonicalModelRef, isRouterTier, ROUTER_TIERS } from './config';
 import { DEFAULT_STALL_TIMEOUT_MS } from './constants';
+import { runTypesafeClassifier } from './typesafe';
 
 export const extractTextFromContent = (
   content: string | Message['content'],
@@ -258,6 +260,27 @@ export const buildClassifierPrompt = (ctx: ClassifierPromptContext): string => {
   }
 
   return lines.join('\n');
+};
+
+/**
+ * Assemble the classifier prompt context from a conversation. Pure — no I/O.
+ * Shared by the chat backend and the TypeSafe backend.
+ */
+export const buildClassifierPromptContext = (
+  context: Context,
+  currentPhase?: RouterPhase,
+  hasImage?: boolean,
+): ClassifierPromptContext => {
+  const promptText = getLastUserText(context);
+  return {
+    promptText,
+    historyText: getRecentConversationText(context, 6),
+    toolResultCount: countToolResults(context),
+    wordCount: countWords(promptText),
+    multiLinePrompt: promptText.split('\n').length >= 4,
+    currentPhase,
+    hasImage,
+  };
 };
 
 export const matchHighestTierRule = (
@@ -811,8 +834,24 @@ export const runClassifier = async (
   signal?: AbortSignal,
   stallTimeoutMs?: number,
   onStall?: (ref: string, ms: number) => void,
+  backend: ClassifierBackend = 'chat',
 ): Promise<ClassifierResult | undefined> => {
   const timeoutMs = stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+
+  // TypeSafe (Jev) backend: one structured POST, no chat stream, no registry.
+  // The state carries the classifier prompt. The tier question asks for one of
+  // the three router criteria, so the answer needs no parser.
+  if (backend === 'typesafe') {
+    return runTypesafeClassifier(refs, {
+      state: buildClassifierPrompt(
+        buildClassifierPromptContext(context, currentPhase, hasImage),
+      ),
+      signal,
+      timeoutMs,
+      onStall,
+    });
+  }
+
   for (const ref of refs) {
     if (signal?.aborted) {
       return undefined;
@@ -844,21 +883,11 @@ export const runClassifier = async (
       const apiKey = auth.apiKey;
       const headers = auth.headers;
 
-      const promptText = getLastUserText(context);
-      const historyText = getRecentConversationText(context, 6);
-      const toolResultCount = countToolResults(context);
-      const wordCount = countWords(promptText);
-      const multiLinePrompt = promptText.split('\n').length >= 4;
-
-      const classifierCtx: ClassifierPromptContext = {
-        promptText,
-        historyText,
-        toolResultCount,
-        wordCount,
-        multiLinePrompt,
+      const classifierCtx = buildClassifierPromptContext(
+        context,
         currentPhase,
         hasImage,
-      };
+      );
       const classifierPrompt = buildClassifierPrompt(classifierCtx);
 
       const classifierContext: Context = {

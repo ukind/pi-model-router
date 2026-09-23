@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   registerRouterProvider,
   createErrorMessage,
@@ -50,6 +51,15 @@ vi.mock('@earendil-works/pi-ai', () => ({
 vi.mock('@earendil-works/pi-ai/compat', () => ({
   streamSimple: vi.fn(),
   getApiProvider: vi.fn().mockReturnValue({ streamSimple: vi.fn() }),
+}));
+
+// The Jev key comes from a file in the agent dir. Stub the fs read, so the
+// harness stays hermetic on a machine that holds a real key file.
+vi.mock('node:fs', () => ({
+  existsSync: vi.fn(() => false),
+  readFileSync: vi.fn(() => {
+    throw new Error('ENOENT: typesafe_api_key');
+  }),
 }));
 
 describe('provider.ts', () => {
@@ -125,6 +135,13 @@ describe('provider.ts', () => {
       updateStatus: vi.fn(),
       syncPiThinkingLevel: vi.fn(),
     };
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.mocked(readFileSync).mockImplementation(() => {
+      throw new Error('ENOENT: typesafe_api_key');
+    });
   });
 
   describe('createErrorMessage', () => {
@@ -1544,6 +1561,48 @@ describe('provider.ts', () => {
         'warning',
       );
       expect(mockActions.persistState).toHaveBeenCalled();
+    });
+
+    it('should run the classifier through the Jev backend when configured', async () => {
+      mockState.currentConfig.classifierModel = {
+        backend: 'typesafe',
+        model: 'typesafe/jev-latest',
+      };
+      vi.mocked(readFileSync).mockReturnValue('test-key\n');
+      const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => ({
+        ok: true,
+        json: async () => ({
+          answers: { tier: { type: 'choice', choice: 'high', confidence: 0.95 } },
+        }),
+      }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      const delegated: string[] = [];
+      vi.mocked(streamSimple).mockImplementation(((model: any) => {
+        delegated.push(model.id);
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'answer' };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.0005 } } },
+          };
+        })() as any;
+      }) as any);
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(150);
+
+      // The Jev answer reached decideRouting: the classifier branch won.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(mockState.lastDecision?.isClassifier).toBe(true);
+      expect(mockState.lastDecision?.tier).toBe('high');
+      expect(delegated).toEqual(['gpt-4o']); // the mock's high tier model
     });
   });
 

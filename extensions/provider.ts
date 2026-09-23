@@ -637,6 +637,7 @@ export const registerRouterProvider = (
               (ref, ms) => {
                 notifyStall(`classifier ${ref} stalled after ${ms}ms`);
               },
+              state.currentConfig.classifierModel.backend,
             );
           }
 

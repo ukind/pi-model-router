@@ -117,7 +117,9 @@ This example demonstrates every supported field. All fields except `profiles` ar
 **Key points about this example:**
 
 - **`models`**: Defines reusable aliases (`gpt-pro`, `flash`, `nano`). Aliases can be referenced anywhere a model ref is accepted — in tier `model`, tier `fallbacks`, and `classifierModel`.
-- **`classifierModel`**: Can be a plain string (`"flash"`) or an object with a `thinking` level. Here it uses the object form to set the classifier's reasoning level.
+- **`classifierModel`**: Can be a plain string (`"flash"`) or an object. The object form sets
+  the `thinking` level for the chat backend. The `"typesafe"` backend uses Jev instead, for
+  example `{ "backend": "typesafe", "model": "typesafe/jev-latest" }`.
 - **`rules`**: Each rule matches a string or array of strings (word-boundary match, case-insensitive; multi-word phrase hints, e.g. `step by step`, use substring match). When multiple rules match, the highest tier wins. Rules are skipped when a tier is pinned.
 - **`profiles.auto.high`**: Uses the `gpt-pro` alias and defines a same-tier `fallbacks` chain to a different provider (Anthropic).
 - **`profiles.auto.medium`**: Overrides the alias's resolved `contextWindow` and `maxTokens` at the tier level.
@@ -137,19 +139,44 @@ This example demonstrates every supported field. All fields except `profiles` ar
 
 ### Configuration Fields
 
-| Field                    | Description                                                                                                                                                                                                                                                                                                           |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `classifierModel`        | (Optional) Model used to categorize intent. Accepts either a model ref / alias string (`"google/gemini-flash-latest"`) or an object `{ "model": "alias-or-ref", "thinking": "off\|minimal\|low\|medium\|high\|xhigh" }`. If omitted, fast heuristics are used.                                                        |
-| `maxSessionBudget`       | (Optional) USD budget for the session. Forces a lower tier once exceeded; respects the available tiers (no silent re-promotion).                                                                                                                                                                                      |
-| `stallTimeoutMs`         | (Optional) Inactivity timeout in milliseconds for every external wait in the per-turn path (classifier stream, delegated model stream, auth fetch). Zero stream events for this long counts as a stall: the stalled model is cancelled and the next fallback model is tried. Default `90000`. |
-| `phaseBias`              | (0.0 - 1.0) Stickiness of the current phase. Higher = more stable. Default `0.5`.                                                                                                                                                                                                                                     |
-| `rules`                  | List of custom keyword rules. Each rule: `{ "matches": "string\|string[]", "tier": "high\|medium\|low", "reason"?: "string" }`. When multiple rules match, the highest tier wins. Skipped when a tier is pinned.                                                                                                      |
-| `models`                 | (Optional) Map of model aliases to definitions: `{ "alias": { "model": "provider/id", "contextWindow"?: number, "maxTokens"?: number, "reasoning"?: boolean, "thinkingLevels"?: ThinkingLevel[] } }`. Aliases are usable wherever a model ref string is accepted (tier `model`, tier `fallbacks`, `classifierModel`). |
-| `profiles`               | Map of profile definitions, each containing optional `high`, `medium`, and `low` tiers (at least one required).                                                                                                                                                                                                       |
-| `profiles.<name>.<tier>` | Tier config: `{ "model": "alias-or-ref", "thinking"?: ThinkingLevel, "fallbacks"?: string[], "contextWindow"?: number, "maxTokens"?: number, "reasoning"?: boolean, "thinkingLevels"?: ThinkingLevel[] }`. `fallbacks` are tried in order before cross-tier degradation.                                              |
-| `debug`                  | (Optional) Boolean. When `true`, auto-enables turn-by-turn routing notifications on every startup (equivalent to persisting `/router debug on` across restarts). Default `false`.                                                                                                                                     |
+| Field                    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `classifierModel`        | (Optional) Model used to categorize intent. Accepts either a model ref / alias string (`"google/gemini-flash-latest"`) or an object `{ "model": "alias-or-ref", "backend"?: "chat"\|"typesafe", "thinking"?: "off\|minimal\|low\|medium\|high\|xhigh" }`. The default backend is `"chat"`. The `"typesafe"` backend calls Jev (typesafe.ai System One) and reads the API key from the `typesafe_api_key` file in the agent dir. If the key file is missing, fast heuristics are used. |
+| `maxSessionBudget`       | (Optional) USD budget for the session. Forces a lower tier once exceeded; respects the available tiers (no silent re-promotion).                                                                                                                                                                                                                                                                                                                                                      |
+| `stallTimeoutMs`         | (Optional) Inactivity timeout in milliseconds for every external wait in the per-turn path (classifier stream, delegated model stream, auth fetch). Zero stream events for this long counts as a stall: the stalled model is cancelled and the next fallback model is tried. Default `90000`.                                                                                                                                                                                         |
+| `phaseBias`              | (0.0 - 1.0) Stickiness of the current phase. Higher = more stable. Default `0.5`.                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `rules`                  | List of custom keyword rules. Each rule: `{ "matches": "string\|string[]", "tier": "high\|medium\|low", "reason"?: "string" }`. When multiple rules match, the highest tier wins. Skipped when a tier is pinned.                                                                                                                                                                                                                                                                      |
+| `models`                 | (Optional) Map of model aliases to definitions: `{ "alias": { "model": "provider/id", "contextWindow"?: number, "maxTokens"?: number, "reasoning"?: boolean, "thinkingLevels"?: ThinkingLevel[] } }`. Aliases are usable wherever a model ref string is accepted (tier `model`, tier `fallbacks`, `classifierModel`).                                                                                                                                                                 |
+| `profiles`               | Map of profile definitions, each containing optional `high`, `medium`, and `low` tiers (at least one required).                                                                                                                                                                                                                                                                                                                                                                       |
+| `profiles.<name>.<tier>` | Tier config: `{ "model": "alias-or-ref", "thinking"?: ThinkingLevel, "fallbacks"?: string[], "contextWindow"?: number, "maxTokens"?: number, "reasoning"?: boolean, "thinkingLevels"?: ThinkingLevel[] }`. `fallbacks` are tried in order before cross-tier degradation.                                                                                                                                                                                                              |
+| `debug`                  | (Optional) Boolean. When `true`, auto-enables turn-by-turn routing notifications on every startup (equivalent to persisting `/router debug on` across restarts). Default `false`.                                                                                                                                                                                                                                                                                                     |
 
 Where `ThinkingLevel` is one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`.
+
+### Jev (TypeSafe) classifier
+
+The `"typesafe"` backend sends one POST to `https://api.typesafe.ai/v1/systemone`. Jev
+answers the `tier` question with `high`, `medium`, or `low`, and the router uses that tier
+for the turn.
+
+Give the key in the agent directory. The file holds the key on one line, with no quotes and
+no variable name:
+
+```text
+C:\Users\<name>\.pi\agent\typesafe_api_key    (Windows)
+~/.pi/agent/typesafe_api_key                  (other systems)
+```
+
+Select the backend in the configuration:
+
+```json
+{
+  "classifierModel": { "backend": "typesafe", "model": "typesafe/jev-latest" }
+}
+```
+
+If the key is absent, or the request fails, or the answer carries no usable tier, the router
+falls back to the fast heuristics for that turn. The turn never fails.
 
 ## Commands
 
