@@ -126,6 +126,13 @@ export const sanitizeRoutingDecisionFields = (
   if (isConfidenceLevel(value.confidence)) {
     out.confidence = value.confidence;
   }
+  if (
+    typeof value.confidenceNumeric === 'number' &&
+    !Number.isNaN(value.confidenceNumeric) &&
+    Number.isFinite(value.confidenceNumeric)
+  ) {
+    out.confidenceNumeric = value.confidenceNumeric;
+  }
   if (isOptionalString(value.rawText)) {
     out.rawText = value.rawText;
   }

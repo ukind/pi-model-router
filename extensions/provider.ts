@@ -750,15 +750,30 @@ export const registerRouterProvider = (
                 promotedDecision.isPinned = decision.isPinned;
                 promotedDecision.isRuleMatched = decision.isRuleMatched;
                 promotedDecision.isBudgetForced = decision.isBudgetForced;
+                // The "ran" bit and the failure reason survive promotion even
+                // when the classifier answer was unusable (isClassifier false).
+                promotedDecision.classifierAttempted =
+                  decision.classifierAttempted;
+                if (decision.classifierTier) {
+                  promotedDecision.classifierTier = decision.classifierTier;
+                }
                 if (decision.isClassifier) {
                   promotedDecision.isClassifier = decision.isClassifier;
+                }
+                if (decision.confidence) {
                   promotedDecision.confidence = decision.confidence;
+                }
+                if (decision.confidenceNumeric !== undefined) {
+                  promotedDecision.confidenceNumeric =
+                    decision.confidenceNumeric;
+                }
+                if (decision.rawText) {
                   promotedDecision.rawText = decision.rawText;
-                  promotedDecision.failureReason = decision.failureReason;
-                  if (decision.isVetoed) {
-                    promotedDecision.isVetoed = decision.isVetoed;
-                    promotedDecision.vetoReason = decision.vetoReason;
-                  }
+                }
+                promotedDecision.failureReason = decision.failureReason;
+                if (decision.isVetoed) {
+                  promotedDecision.isVetoed = decision.isVetoed;
+                  promotedDecision.vetoReason = decision.vetoReason;
                 }
                 decision = promotedDecision;
               }

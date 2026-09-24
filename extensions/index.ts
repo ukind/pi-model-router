@@ -163,9 +163,11 @@ const routerExtension = (pi: ExtensionAPI) => {
       else if (decision.isPinned) source = 'pin';
       else source = 'heuristic';
       const provenance =
-        decision.isClassifier && decision.confidence
-          ? ` (confidence: ${decision.confidence})`
-          : '';
+        decision.isClassifier && decision.confidenceNumeric !== undefined
+          ? ` (confidence: ${decision.confidenceNumeric.toFixed(2)})`
+          : decision.isClassifier && decision.confidence
+            ? ` (confidence: ${decision.confidence})`
+            : '';
       lastExtensionContext.ui.notify(
         `router → ${decision.targetProvider}/${decision.targetModelId} [${decision.tier}, ${source}]${provenance}`,
         'info',

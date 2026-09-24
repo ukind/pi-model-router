@@ -1569,11 +1569,13 @@ describe('provider.ts', () => {
         model: 'typesafe/jev-latest',
       };
       vi.mocked(readFileSync).mockReturnValue('test-key\n');
+      const body = JSON.stringify({
+        answers: { tier: { type: 'choice', choice: 'high', confidence: 0.95 } },
+      });
       const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => ({
         ok: true,
-        json: async () => ({
-          answers: { tier: { type: 'choice', choice: 'high', confidence: 0.95 } },
-        }),
+        text: async () => body,
+        json: async () => JSON.parse(body),
       }));
       vi.stubGlobal('fetch', fetchMock);
 
@@ -1603,6 +1605,55 @@ describe('provider.ts', () => {
       expect(mockState.lastDecision?.isClassifier).toBe(true);
       expect(mockState.lastDecision?.tier).toBe('high');
       expect(delegated).toEqual(['gpt-4o']); // the mock's high tier model
+    });
+
+    it('should keep a Jev failure visible in the decision provenance', async () => {
+      mockState.currentConfig.classifierModel = {
+        backend: 'typesafe',
+        model: 'typesafe/jev-latest',
+      };
+      vi.mocked(readFileSync).mockReturnValue('test-key\n');
+      const body = JSON.stringify({
+        answers: {
+          tier: { type: 'choice', choice: 'gigantic', confidence: 0.9 },
+        },
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_url: string, _init: RequestInit) => ({
+          ok: true,
+          text: async () => body,
+          json: async () => JSON.parse(body),
+        })),
+      );
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      const delegated: string[] = [];
+      vi.mocked(streamSimple).mockImplementation(((model: any) => {
+        delegated.push(model.id);
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'heuristic answer' };
+          yield {
+            type: 'done',
+            message: { usage: { cost: { total: 0.0005 } } },
+          };
+        })() as any;
+      }) as any);
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(150);
+
+      // The unusable Jev answer fell back to heuristics, but the turn stays
+      // visibly marked as a classifier attempt that failed (FR4).
+      expect(mockState.lastDecision?.isClassifier).toBeFalsy();
+      expect(mockState.lastDecision?.classifierAttempted).toBe(true);
+      expect(mockState.lastDecision?.failureReason).toBe('json-invalid');
+      expect(delegated.length).toBeGreaterThan(0);
     });
   });
 

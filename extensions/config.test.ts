@@ -644,6 +644,59 @@ describe('config.ts', () => {
       expect(warnings).toEqual([]);
     });
 
+    it('should warn when thinking is set with the typesafe (Jev) backend', () => {
+      const raw = {
+        profiles: {
+          balanced: { high: { model: 'openai/gpt-4o' } },
+        },
+        classifierModel: {
+          backend: 'typesafe',
+          model: 'typesafe/jev-latest',
+          thinking: 'high',
+        },
+      };
+      const { config, warnings } = normalizeConfig(
+        raw as unknown as RouterConfig,
+      );
+      expect(config.classifierModel?.backend).toBe('typesafe');
+      expect(config.classifierModel?.thinking).toBe('high');
+      expect(warnings).toEqual([
+        'classifierModel "thinking" is not forwarded to the typesafe (Jev) backend. Ignored by the classifier call.',
+      ]);
+    });
+
+    it('should not warn about thinking on the chat backend', () => {
+      const raw = {
+        profiles: {
+          balanced: { high: { model: 'openai/gpt-4o' } },
+        },
+        classifierModel: { model: 'openai/gpt-4o', thinking: 'low' },
+      };
+      const { warnings } = normalizeConfig(raw as unknown as RouterConfig);
+      expect(warnings).toEqual([]);
+    });
+
+    it('should warn twice when an invalid thinking level is set with the typesafe backend', () => {
+      const raw = {
+        profiles: {
+          balanced: { high: { model: 'openai/gpt-4o' } },
+        },
+        classifierModel: {
+          backend: 'typesafe',
+          model: 'typesafe/jev-latest',
+          thinking: 'super-invalid',
+        },
+      };
+      const { config, warnings } = normalizeConfig(
+        raw as unknown as RouterConfig,
+      );
+      expect(config.classifierModel?.backend).toBe('typesafe');
+      expect(config.classifierModel?.thinking).toBeUndefined();
+      expect(warnings.length).toBe(2);
+      expect(warnings[0]).toContain('invalid thinking level');
+      expect(warnings[1]).toContain('not forwarded to the typesafe');
+    });
+
     it('should warn and ignore an unknown classifier backend', () => {
       const raw = {
         profiles: {

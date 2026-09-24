@@ -250,6 +250,7 @@ describe('state.ts', () => {
         isVetoed: false,
         vetoReason: 'explicit-hint',
         confidence: 'high',
+        confidenceNumeric: 0.87,
         rawText: 'tier: high',
         failureReason: 'success',
       });
@@ -259,8 +260,35 @@ describe('state.ts', () => {
       expect(out?.isRuleMatched).toBe(true);
       expect(out?.vetoReason).toBe('explicit-hint');
       expect(out?.confidence).toBe('high');
+      expect(out?.confidenceNumeric).toBe(0.87);
       expect(out?.rawText).toBe('tier: high');
       expect(out?.failureReason).toBe('success');
+    });
+
+    it('drops invalid confidenceNumeric but keeps a valid one', () => {
+      const nan = sanitizeRoutingDecisionFields({
+        ...minimal,
+        confidenceNumeric: Number.NaN,
+      });
+      expect(nan?.confidenceNumeric).toBeUndefined();
+
+      const infinity = sanitizeRoutingDecisionFields({
+        ...minimal,
+        confidenceNumeric: Number.POSITIVE_INFINITY,
+      });
+      expect(infinity?.confidenceNumeric).toBeUndefined();
+
+      const wrongType = sanitizeRoutingDecisionFields({
+        ...minimal,
+        confidenceNumeric: '0.9',
+      });
+      expect(wrongType?.confidenceNumeric).toBeUndefined();
+
+      const valid = sanitizeRoutingDecisionFields({
+        ...minimal,
+        confidenceNumeric: 0.87,
+      });
+      expect(valid?.confidenceNumeric).toBe(0.87);
     });
 
     it('drops invalid boolean flags but keeps the rest', () => {

@@ -16,8 +16,13 @@ import type {
   ClassifierPromptContext,
 } from './types';
 import { parseCanonicalModelRef, isRouterTier, ROUTER_TIERS } from './config';
-import { DEFAULT_STALL_TIMEOUT_MS } from './constants';
-import { runTypesafeClassifier } from './typesafe';
+import {
+  DEFAULT_STALL_TIMEOUT_MS,
+  CLASSIFIER_OVERRIDE_FLOOR,
+  CLASSIFIER_VETO_FLOOR,
+  CLASSIFIER_DEGRADE_FLOOR,
+} from './constants';
+import { runTypesafeClassifier, buildTypesafeState } from './typesafe';
 
 export const extractTextFromContent = (
   content: string | Message['content'],
@@ -307,6 +312,39 @@ export const matchHighestTierRule = (
   return best;
 };
 
+/**
+ * A classifier result is usable when it succeeded and carries a tier.
+ * Failure-carrying results (ran but unusable / transport failure) are not.
+ */
+export const isUsableClassifierResult = (
+  result: ClassifierResult | undefined,
+): result is ClassifierResult & { tier: RouterTier } =>
+  result !== undefined &&
+  result.failureReason === 'success' &&
+  result.tier !== undefined;
+
+/**
+ * True when the result clears a high-stakes floor (rule override, veto
+ * suppression). Reads the numeric confidence first; falls back to the word
+ * bucket so the chat path (words only) is unchanged.
+ */
+export const isHighConfidence = (
+  result: ClassifierResult,
+  floor: number,
+): boolean =>
+  result.confidenceNumeric !== undefined
+    ? result.confidenceNumeric >= floor
+    : result.confidence === 'high';
+
+/**
+ * True when the result falls below the degrade floor and the classifier
+ * answer must not be used. Numeric first; word fallback ('low') for chat.
+ */
+export const isLowConfidence = (result: ClassifierResult): boolean =>
+  result.confidenceNumeric !== undefined
+    ? result.confidenceNumeric < CLASSIFIER_DEGRADE_FLOOR
+    : result.confidence === 'low';
+
 export const decideRouting = (
   context: Context,
   profileName: string,
@@ -429,25 +467,28 @@ export const decideRouting = (
     isPinned = true;
   } else {
     const ruleMatch = ruleHit ?? matchHighestTierRule(prompt, rules);
-    if (ruleMatch && classifierResult) {
-      // Rule + classifier both present: merge logic
-      // Prefer higher tier when classifier confidence is 'high'
-      // Trust the rule when classifier confidence is 'low'
+    const usableResult = isUsableClassifierResult(classifierResult)
+      ? classifierResult
+      : undefined;
+    if (ruleMatch && usableResult) {
+      // Rule + classifier both present: merge logic. Prefer the higher tier
+      // when the classifier clears the override floor (numeric first; word
+      // fallback keeps the chat path identical).
       classifierAttempted = true;
-      classifierTier = classifierResult.tier;
+      classifierTier = usableResult.tier;
       const tierRank: Record<RouterTier, number> = {
         low: 1,
         medium: 2,
         high: 3,
       };
       if (
-        classifierResult.confidence === 'high' &&
-        tierRank[classifierResult.tier] > tierRank[ruleMatch.tier]
+        isHighConfidence(usableResult, CLASSIFIER_OVERRIDE_FLOOR) &&
+        tierRank[usableResult.tier] > tierRank[ruleMatch.tier]
       ) {
         isClassifier = true;
-        tier = classifierResult.tier;
+        tier = usableResult.tier;
         phase = previousDecision?.phase ?? phaseForTier(tier);
-        reasoning = `Classifier: ${classifierResult.reasoning} (merged: classifier high-confidence preferred over rule)`;
+        reasoning = `Classifier: ${usableResult.reasoning} (merged: classifier high-confidence preferred over rule)`;
         vetoOutcome = 'classifier-wins';
       } else {
         tier = ruleMatch.tier;
@@ -461,26 +502,29 @@ export const decideRouting = (
       phase = phaseForTier(tier);
       reasoning = ruleMatch.reasoning;
       isRuleMatched = true;
-    } else if (classifierResult) {
+      // A failure-carrying classifier result still ran — keep it visible.
+      if (classifierResult) classifierAttempted = true;
+    } else if (usableResult) {
       classifierAttempted = true;
-      classifierTier = classifierResult.tier;
+      classifierTier = usableResult.tier;
 
       // Low confidence: degrade to heuristic branch
-      if (classifierResult.confidence === 'low') {
-        // Fall through to heuristic branch below
-        // classifierAttempted = true for provenance
-        // isClassifier stays false — heuristic branch runs
+      if (isLowConfidence(usableResult)) {
+        // Fall through to heuristic branch below.
+        // classifierAttempted stays true for provenance;
+        // isClassifier stays false — heuristic branch runs.
       } else {
         isClassifier = true;
-        let candidateTier = classifierResult.tier;
+        let candidateTier = usableResult.tier;
 
-        // Confidence-aware veto: only override when confidence !== 'high'
+        // Confidence-aware veto: only override when confidence is below the
+        // veto floor (numeric first; word fallback keeps chat identical).
         const promptHasHighHint = containsAnyWord(prompt, explicitHighHints);
         const promptHasLowHint = containsAnyWord(prompt, explicitLowHints);
         if (
           promptHasHighHint &&
           candidateTier !== 'high' &&
-          classifierResult.confidence !== 'high'
+          !isHighConfidence(usableResult, CLASSIFIER_VETO_FLOOR)
         ) {
           candidateTier = 'high';
           isVetoed = true;
@@ -488,7 +532,7 @@ export const decideRouting = (
         } else if (
           promptHasLowHint &&
           candidateTier !== 'low' &&
-          classifierResult.confidence !== 'high'
+          !isHighConfidence(usableResult, CLASSIFIER_VETO_FLOOR)
         ) {
           candidateTier = 'low';
           isVetoed = true;
@@ -498,19 +542,24 @@ export const decideRouting = (
         tier = candidateTier;
         phase = previousDecision?.phase ?? phaseForTier(tier);
         reasoning = isVetoed
-          ? `Classifier: ${classifierResult.reasoning} (vetoed: explicit-hint forced ${tier})`
-          : `Classifier: ${classifierResult.reasoning}`;
+          ? `Classifier: ${usableResult.reasoning} (vetoed: explicit-hint forced ${tier})`
+          : `Classifier: ${usableResult.reasoning}`;
 
         if (isVetoed) {
           vetoOutcome = 'veto-wins';
           vetoDisagreementMagnitude = Math.abs(
-            ROUTER_TIERS.indexOf(classifierResult.tier) -
+            ROUTER_TIERS.indexOf(usableResult.tier) -
               ROUTER_TIERS.indexOf(candidateTier),
           );
         } else {
           vetoOutcome = 'classifier-wins';
         }
       }
+    } else if (classifierResult) {
+      // Classifier ran but its answer was unusable (json-invalid /
+      // infra-failure): visible fallback to heuristics. The reason threads
+      // through the provenance block below.
+      classifierAttempted = true;
     }
 
     if (!isClassifier && !ruleMatch && !pinnedTier) {
@@ -646,9 +695,16 @@ export const decideRouting = (
   }
   // Thread classifier provenance when classifier was the source
   if (classifierResult) {
-    decision.confidence = classifierResult.confidence;
-    decision.rawText = classifierResult.rawText;
+    if (classifierResult.confidence) {
+      decision.confidence = classifierResult.confidence;
+    }
+    if (classifierResult.rawText) {
+      decision.rawText = classifierResult.rawText;
+    }
     decision.failureReason = classifierResult.failureReason;
+    if (classifierResult.confidenceNumeric !== undefined) {
+      decision.confidenceNumeric = classifierResult.confidenceNumeric;
+    }
     if (isVetoed) {
       decision.isVetoed = true;
       decision.vetoReason = vetoReason;
@@ -839,11 +895,11 @@ export const runClassifier = async (
   const timeoutMs = stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
 
   // TypeSafe (Jev) backend: one structured POST, no chat stream, no registry.
-  // The state carries the classifier prompt. The tier question asks for one of
-  // the three router criteria, so the answer needs no parser.
+  // The state carries Jev-native conversation content; instructions live in
+  // the questions.
   if (backend === 'typesafe') {
     return runTypesafeClassifier(refs, {
-      state: buildClassifierPrompt(
+      state: buildTypesafeState(
         buildClassifierPromptContext(context, currentPhase, hasImage),
       ),
       signal,

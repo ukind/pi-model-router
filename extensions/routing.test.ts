@@ -20,7 +20,12 @@ import {
 import { readFileSync } from 'node:fs';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
 import type { Context, Message, UserMessage } from '@earendil-works/pi-ai';
-import type { RouterProfile, RoutingRule, ClassifierResult } from './types';
+import type {
+  RouterProfile,
+  RoutingRule,
+  RouterTier,
+  ClassifierResult,
+} from './types';
 
 vi.mock('@earendil-works/pi-ai/compat', () => ({
   streamSimple: vi.fn(),
@@ -571,6 +576,209 @@ describe('routing.ts', () => {
       rawText: 'Tier: medium',
       failureReason: 'success',
     });
+
+    describe('numeric confidence floors (additive seam)', () => {
+      const numeric = (tier: RouterTier, n: number): ClassifierResult => ({
+        tier,
+        confidence: n >= 0.8 ? 'high' : n >= 0.5 ? 'medium' : 'low',
+        confidenceNumeric: n,
+        reasoning: 'Jev classified.',
+        rawText: 'answers',
+        failureReason: 'success',
+      });
+      const ruleHitMedium = {
+        tier: 'medium' as RouterTier,
+        reasoning: 'rule medium',
+      };
+
+      it('rule merge: numeric 0.86 clears the override floor and wins over the rule', () => {
+        const context: Context = {
+          messages: [
+            { role: 'user', content: 'continue the work', timestamp: Date.now() },
+          ],
+        };
+        const decision = decideRouting(
+          context, 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          numeric('high', 0.86),
+          ruleHitMedium,
+        );
+        expect(decision.tier).toBe('high');
+        expect(decision.isClassifier).toBe(true);
+        expect(decision.isRuleMatched).toBeFalsy();
+        expect(decision.confidenceNumeric).toBe(0.86);
+      });
+
+      it('rule merge: numeric 0.84 stays under the override floor — the rule wins', () => {
+        const context: Context = {
+          messages: [
+            { role: 'user', content: 'continue the work', timestamp: Date.now() },
+          ],
+        };
+        const decision = decideRouting(
+          context, 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          numeric('high', 0.84),
+          ruleHitMedium,
+        );
+        expect(decision.tier).toBe('medium');
+        expect(decision.isRuleMatched).toBe(true);
+        expect(decision.isClassifier).toBeFalsy();
+      });
+
+      it('rule merge: numeric exactly 0.85 clears the override floor (boundary)', () => {
+        const context: Context = {
+          messages: [
+            { role: 'user', content: 'continue the work', timestamp: Date.now() },
+          ],
+        };
+        const decision = decideRouting(
+          context, 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          numeric('high', 0.85),
+          ruleHitMedium,
+        );
+        expect(decision.tier).toBe('high');
+        expect(decision.isClassifier).toBe(true);
+      });
+
+      it('veto: numeric 0.86 survives the explicit high hint', () => {
+        const context: Context = {
+          messages: [
+            { role: 'user', content: 'ultrathink this through', timestamp: Date.now() },
+          ],
+        };
+        const decision = decideRouting(
+          context, 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          numeric('low', 0.86),
+        );
+        expect(decision.tier).toBe('low');
+        expect(decision.isVetoed).toBeFalsy();
+        expect(decision.vetoOutcome).toBe('classifier-wins');
+      });
+
+      it('veto: numeric 0.84 is suppressed by the explicit high hint', () => {
+        const context: Context = {
+          messages: [
+            { role: 'user', content: 'ultrathink this through', timestamp: Date.now() },
+          ],
+        };
+        const decision = decideRouting(
+          context, 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          numeric('low', 0.84),
+        );
+        expect(decision.tier).toBe('high');
+        expect(decision.isVetoed).toBe(true);
+        expect(decision.vetoReason).toBe('explicit-hint');
+      });
+
+      it('veto: numeric exactly 0.85 survives the explicit high hint (boundary)', () => {
+        const context: Context = {
+          messages: [
+            { role: 'user', content: 'ultrathink this through', timestamp: Date.now() },
+          ],
+        };
+        const decision = decideRouting(
+          context, 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          numeric('low', 0.85),
+        );
+        expect(decision.tier).toBe('low');
+        expect(decision.isVetoed).toBeFalsy();
+      });
+
+      it('degrade: numeric 0.49 falls back to heuristics with attempted provenance', () => {
+        const context: Context = {
+          messages: [
+            {
+              role: 'user',
+              content:
+                'i wonder about some random topic that doesnt match any particular keyword category here today now',
+              timestamp: Date.now(),
+            },
+          ],
+        };
+        const decision = decideRouting(
+          context, 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          numeric('high', 0.49),
+        );
+        expect(decision.isClassifier).toBeFalsy();
+        expect(decision.classifierAttempted).toBe(true);
+        expect(decision.confidenceNumeric).toBe(0.49);
+      });
+
+      it('degrade: numeric 0.5 is used (floor boundary)', () => {
+        const context: Context = {
+          messages: [
+            {
+              role: 'user',
+              content:
+                'i wonder about some random topic that doesnt match any particular keyword category here today now',
+              timestamp: Date.now(),
+            },
+          ],
+        };
+        const decision = decideRouting(
+          context, 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          numeric('high', 0.5),
+        );
+        expect(decision.isClassifier).toBe(true);
+      });
+
+      it('failure result: json-invalid degrades to heuristics with attempted provenance', () => {
+        const context: Context = {
+          messages: [
+            {
+              role: 'user',
+              content:
+                'i wonder about some random topic that doesnt match any particular keyword category here today now',
+              timestamp: Date.now(),
+            },
+          ],
+        };
+        const failure: ClassifierResult = {
+          reasoning: 'Jev answered but the response carried no usable tier/confidence.',
+          rawText: '{"answers":{}}',
+          failureReason: 'json-invalid',
+        };
+        const decision = decideRouting(
+          context, 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          failure,
+        );
+        expect(decision.classifierAttempted).toBe(true);
+        expect(decision.isClassifier).toBeFalsy();
+        expect(decision.failureReason).toBe('json-invalid');
+        expect(decision.confidence).toBeUndefined();
+      });
+
+      it('word fallback: absent numeric keeps the word branch (chat path)', () => {
+        const context: Context = {
+          messages: [
+            { role: 'user', content: 'continue the work', timestamp: Date.now() },
+          ],
+        };
+        const decision = decideRouting(
+          context, 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          {
+            tier: 'high',
+            confidence: 'high',
+            reasoning: 'A.',
+            rawText: 't',
+            failureReason: 'success',
+          },
+          ruleHitMedium,
+        );
+        expect(decision.tier).toBe('high');
+        expect(decision.isClassifier).toBe(true);
+        expect(decision.confidenceNumeric).toBeUndefined();
+      });
+    });;
 
     it('veto: ultrathink + classifier low (high confidence) → classifier wins (confidence-aware veto)', () => {
       const context: Context = {
@@ -1136,12 +1344,16 @@ describe('routing.ts', () => {
         ],
       };
 
-      const okBody = (choice: string, confidence: number) => ({
-        ok: true,
-        json: async () => ({
+      const okBody = (choice: string, confidence: number) => {
+        const body = JSON.stringify({
           answers: { tier: { type: 'choice', choice, confidence } },
-        }),
-      });
+        });
+        return {
+          ok: true,
+          text: async () => body,
+          json: async () => JSON.parse(body),
+        };
+      };
 
       const runJev = (refs: string[], signal?: AbortSignal) =>
         runClassifier(
@@ -1184,6 +1396,49 @@ describe('routing.ts', () => {
         expect(sent.questions.tier.type).toBe('choice');
       });
 
+      it('sends a Jev-native request: structured state, contrastive criteria, signal questions, no chat directive', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
+          okBody('high', 0.92),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        await runJev(['typesafe/jev-latest']);
+
+        const [url, init] = fetchMock.mock.calls[0];
+        expect(url).toBe('https://api.typesafe.ai/v1/systemone');
+        const sent = JSON.parse(String(init.body));
+        // FR1: state is structured content with named fields — not a prompt.
+        expect(typeof sent.state).toBe('object');
+        expect(sent.state.latest_turn).toBe('design the migration');
+        expect(typeof sent.state.recent_history).toBe('string');
+        expect(sent.state.has_image).toBe(false);
+        expect(sent.state.current_phase).toBeUndefined();
+        // No chat-format directive anywhere in the body.
+        expect(JSON.stringify(sent)).not.toContain('Return your decision');
+        // FR2: contrastive criteria, identical field names across tiers.
+        for (const tier of ['high', 'medium', 'low'] as const) {
+          expect(Object.keys(sent.questions.tier.criteria[tier])).toEqual([
+            'covers',
+            'not_for',
+            'examples',
+            'keywords',
+          ]);
+          expect(
+            sent.questions.tier.criteria[tier].keywords.length,
+          ).toBeGreaterThan(10);
+        }
+        expect(sent.questions.tier.type).toBe('choice');
+        // FR2/D13: atomic Noul signal questions ride the same POST.
+        expect(sent.questions.long_request.type).toBe('noul');
+        expect(Object.keys(sent.questions.long_request.criteria)).toEqual([
+          'true',
+          'false',
+        ]);
+        expect(sent.questions.structured_request.type).toBe('noul');
+        expect(sent.questions.implementation_context.type).toBe('noul');
+      });
+
       it('maps Jev confidence through the high/medium/low thresholds', async () => {
         vi.mocked(readFileSync).mockReturnValue('test-key\n');
         const cases = [
@@ -1204,40 +1459,165 @@ describe('routing.ts', () => {
         }
       });
 
-      it('returns undefined on a missing key, an unusable answer, or a failure', async () => {
+      it('maps a Jev answer to tier, numeric confidence, and the display word', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (_url: string, _init: RequestInit) => okBody('medium', 0.72)),
+        );
+
+        const result = await runJev(['typesafe/jev-latest']);
+        expect(result?.tier).toBe('medium');
+        expect(result?.confidenceNumeric).toBe(0.72);
+        expect(result?.confidence).toBe('medium');
+        expect(result?.failureReason).toBe('success');
+      });
+
+      it('records an unusable answer as json-invalid with the body snapshot', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (_url: string, _init: RequestInit) => okBody('gigantic', 0.9)),
+        );
+
+        const result = await runJev(['typesafe/jev-latest']);
+        expect(result?.failureReason).toBe('json-invalid');
+        expect(result?.tier).toBeUndefined();
+        expect(result?.rawText).toContain('gigantic');
+      });
+
+      it('treats a non-numeric confidence as a recorded failure (FR3)', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        const body = JSON.stringify({
+          answers: {
+            tier: { type: 'choice', choice: 'high', confidence: 'high' },
+          },
+        });
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (_url: string, _init: RequestInit) => ({
+            ok: true,
+            text: async () => body,
+            json: async () => JSON.parse(body),
+          })),
+        );
+
+        const result = await runJev(['typesafe/jev-latest']);
+        expect(result?.failureReason).toBe('json-invalid');
+        expect(result?.confidenceNumeric).toBeUndefined();
+      });
+
+      it('treats a 200 body that is not JSON as json-invalid, not infra-failure', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (_url: string, _init: RequestInit) => ({
+            ok: true,
+            text: async () => '<html>proxy error</html>',
+          })),
+        );
+
+        const result = await runJev(['typesafe/jev-latest']);
+        expect(result?.failureReason).toBe('json-invalid');
+        expect(result?.rawText).toBe('<html>proxy error</html>');
+      });
+
+      it('records an HTTP failure as infra-failure and keeps trying the next ref', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        const fetchMock = vi
+          .fn()
+          .mockResolvedValueOnce({
+            ok: false,
+            status: 401,
+            text: async () => '',
+          })
+          .mockResolvedValueOnce(okBody('high', 0.9));
+        vi.stubGlobal('fetch', fetchMock);
+
+        const result = await runJev(['typesafe/first', 'typesafe/jev-latest']);
+        expect(result?.failureReason).toBe('success');
+        expect(result?.tier).toBe('high');
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      });
+
+      it('records a transport failure as infra-failure', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => {
+            throw new Error('network down');
+          }),
+        );
+
+        const result = await runJev(['typesafe/jev-latest']);
+        expect(result?.failureReason).toBe('infra-failure');
+      });
+
+      it('returns undefined when no key is present (never ran)', async () => {
         const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
           okBody('high', 0.9),
         );
         vi.stubGlobal('fetch', fetchMock);
+
         expect(await runJev(['typesafe/jev-latest'])).toBeUndefined();
         expect(fetchMock).not.toHaveBeenCalled();
+      });
 
+      it('reports a stall through onStall and records infra-failure', async () => {
         vi.mocked(readFileSync).mockReturnValue('test-key\n');
-        vi.stubGlobal(
-          'fetch',
-          vi.fn(async (_url: string, _init: RequestInit) =>
-            okBody('gigantic', 0.9),
-          ),
+        const onStall = vi.fn();
+        const fetchMock = vi.fn(
+          (_url: string, init: RequestInit) =>
+            new Promise((_resolve, reject) => {
+              // Never resolves on its own; the stall timer aborts the fetch.
+              init.signal?.addEventListener('abort', () =>
+                reject(new Error('The operation was aborted')),
+              );
+            }),
         );
-        expect(await runJev(['typesafe/jev-latest'])).toBeUndefined();
+        vi.stubGlobal('fetch', fetchMock);
 
+        const result = await runClassifier(
+          ['typesafe/jev-latest'],
+          mockRegistry,
+          typesafeContext,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          15,
+          onStall,
+          'typesafe',
+        );
+        expect(onStall).toHaveBeenCalledTimes(1);
+        expect(onStall).toHaveBeenCalledWith('typesafe/jev-latest', 15);
+        expect(result?.failureReason).toBe('infra-failure');
+      });
+
+      it('notes the atomic signal answers in the reasoning (provenance only)', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        const body = JSON.stringify({
+          answers: {
+            tier: { type: 'choice', choice: 'high', confidence: 0.91 },
+            long_request: { type: 'noul', noul: 0.91 },
+            structured_request: { type: 'noul', noul: 0.88 },
+            implementation_context: { type: 'noul', noul: 0.2 },
+          },
+        });
         vi.stubGlobal(
           'fetch',
           vi.fn(async (_url: string, _init: RequestInit) => ({
-            ok: false,
-            status: 401,
-            json: async () => ({}),
+            ok: true,
+            text: async () => body,
+            json: async () => JSON.parse(body),
           })),
         );
-        expect(await runJev(['typesafe/jev-latest'])).toBeUndefined();
 
-        vi.stubGlobal(
-          'fetch',
-          vi.fn(async (_url: string, _init: RequestInit) => {
-            throw new Error('network down');
-          }),
-        );
-        expect(await runJev(['typesafe/jev-latest'])).toBeUndefined();
+        const result = await runJev(['typesafe/jev-latest']);
+        expect(result?.tier).toBe('high');
+        expect(result?.reasoning).toContain('long request');
+        expect(result?.reasoning).toContain('structured request');
+        expect(result?.reasoning).not.toContain('implementation context');
       });
 
       it('skips a ref without a provider slash and tries the next ref', async () => {

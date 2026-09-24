@@ -52,10 +52,14 @@ export interface ClassifierPromptContext {
 }
 
 export interface ClassifierResult {
-  tier: RouterTier;
-  confidence: ConfidenceLevel;
+  /** Absent when the classifier ran but answered unusably (failureReason !== 'success'). */
+  tier?: RouterTier;
+  confidence?: ConfidenceLevel;
+  /** Numeric confidence in [0,1] as reported by the backend. The routing gates read this first. */
+  confidenceNumeric?: number;
   reasoning: string;
-  rawText: string;
+  /** Raw answer snapshot; carries the unusable body for failure results. */
+  rawText?: string;
   failureReason: ClassifierFailureReason;
 }
 
@@ -113,6 +117,8 @@ export interface RoutingDecision {
   isRuleMatched?: boolean;
   isPinned?: boolean;
   confidence?: ConfidenceLevel;
+  /** Numeric classifier confidence when the backend reported one. */
+  confidenceNumeric?: number;
   rawText?: string;
   failureReason?: ClassifierFailureReason;
   isVetoed?: boolean;

@@ -524,6 +524,15 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
             `classifierModel has invalid backend "${String(rawClassifier.backend)}". Ignored.`,
           );
         }
+        // Dead-knob warning: `thinking` is accepted but never forwarded on the
+        // typesafe branch (routing.ts early-returns before the only reader).
+        // Guarded on the raw value, so an invalid level + typesafe honestly
+        // fires this warning alongside the invalid-level warning above.
+        if (backend === 'typesafe' && rawClassifier.thinking !== undefined) {
+          warnings.push(
+            'classifierModel "thinking" is not forwarded to the typesafe (Jev) backend. Ignored by the classifier call.',
+          );
+        }
         classifierModel = {
           model: resolved.canonicalRef,
           backend,
