@@ -1,9 +1,10 @@
 /**
  * TypeSafe (Jev / System One) classifier backend.
  *
- * The call is not chat-shaped. One POST returns typed answers. The `tier`
- * question asks for one of the three router criteria, so the answer maps to a
- * tier directly and no output parser is needed.
+ * The call is not chat-shaped. One POST returns typed answers. The
+ * `work_type` question asks for one of the four router work types; the
+ * mapper converts the answer to a tier through WORK_TYPE_TO_TIER, so no
+ * output parser is needed.
  * Contract: https://docs.typesafe.ai/introduction/quickstart
  */
 import { readFileSync } from 'node:fs';
@@ -14,9 +15,13 @@ import type {
   ClassifierResult,
   ConfidenceLevel,
   RouterPhase,
-  RouterTier,
+  RouterWorkType,
 } from './types';
-import { isRouterTier, parseCanonicalModelRef } from './config';
+import {
+  isRouterWorkType,
+  parseCanonicalModelRef,
+  WORK_TYPE_TO_TIER,
+} from './config';
 
 export const TYPESAFE_ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
 export const TYPESAFE_DEFAULT_MODEL = 'jev-latest';
@@ -44,7 +49,7 @@ export interface TypesafeCriterion {
   not_for: string;
   examples: string;
   /**
-   * The router's own hint/keyword vocabulary for this tier (routing.ts
+   * The router's own hint/keyword vocabulary for this work type (routing.ts
    * explicitHighHints / explicitLowHints / planning / summary /
    * implementation / lookup keyword sets). Docs allow arrays in criteria
    * values; the eval (Follow-up 2) shows this array is the single largest
@@ -53,15 +58,19 @@ export interface TypesafeCriterion {
   keywords: string[];
 }
 
+/** The answer vocabulary on the wire: `unknown` never crosses it (FR7). */
+type WireWorkType = Exclude<RouterWorkType, 'unknown'>;
+
 // Eval-v2 rubric (Follow-up 2): 19/19 on the labeled live eval, mean
-// confidence 0.976. Enriched from the router's own keyword sets and phase
-// semantics — do not trim the keywords arrays; they carry the accuracy.
-const TIER_CRITERIA: Record<RouterTier, TypesafeCriterion> = {
-  high: {
+// confidence 0.976. Re-keyed from tiers to work types; the 66-token keyword
+// multiset is preserved exactly (parity-pinned in routing.test.ts).
+// Do not trim the keywords arrays; they carry the accuracy.
+const WORK_TYPE_CRITERIA: Record<WireWorkType, TypesafeCriterion> = {
+  planning: {
     covers:
       'Requests that need design judgment or broad analysis: planning, architecture, tradeoff analysis, migration strategy, comparing approaches, root-cause investigation, codebase research, and large multi-file refactors. Also long detailed multi-part requests (roughly 40 or more words) and requests asking for deep, thorough, careful, comprehensive, or best-quality work.',
     not_for:
-      'Bounded edits with a known plan, routine implementation, focused single-file debugging, tests and fixes, summaries and formatting, and read-only lookups. A short fix or continue request is not high even when the project is complex.',
+      'Bounded edits with a known plan, routine implementation, focused single-file debugging, tests and fixes, summaries and formatting, and read-only lookups. A short fix or continue request is not planning even when the project is complex.',
     examples:
       'Design the migration plan for the settings module; analyze why the build is slow across the codebase; weigh two persistence approaches; ultrathink: audit this service for correctness; research the auth flow and propose a redesign.',
     keywords: [
@@ -92,11 +101,11 @@ const TIER_CRITERIA: Record<RouterTier, TypesafeCriterion> = {
       'step by step',
     ],
   },
-  medium: {
+  implementation: {
     covers:
       'Hands-on implementation with a clear target: writing or editing code, fixing bugs, adding or updating tests, applying a patch, small-to-medium refactors, multi-file edits under an agreed plan, and continuing or resuming in-progress work. Also edits to project files such as readme, docs, or configuration as part of development work. The default for general coding requests and for image attachments during active coding.',
     not_for:
-      'Open-ended design, planning, or research requests (high). Summaries, changelogs, formatting, renames, and read-only lookups (low).',
+      'Open-ended design, planning, or research requests (planning). Summaries, changelogs, formatting, renames, and read-only lookups (summary or lookup).',
     examples:
       'Implement the agreed change in three files; fix this failing test; continue the work; add input validation and update its tests; refactor the config loader per the plan; update the readme to document the new flag.',
     keywords: [
@@ -117,13 +126,13 @@ const TIER_CRITERIA: Record<RouterTier, TypesafeCriterion> = {
       'go ahead',
     ],
   },
-  low: {
+  summary: {
     covers:
-      'Short bounded low-effort outputs: summaries, recaps, changelogs, TL;DRs, brief explanations, formatting, renames, and small text transforms. Read-only lookups such as where something lives or which files match. Requests asking for fast, quick, cheap, brief, one-sentence, or one-line answers.',
+      'Short bounded low-effort outputs: summaries, recaps, changelogs, TL;DRs, brief explanations, formatting, renames, and small text transforms. Requests asking for fast, quick, cheap, brief, one-sentence, or one-line answers.',
     not_for:
-      'Any request that writes or changes code, documentation, or configuration, however small (medium). Design, planning, and analysis work (high).',
+      'Any request that writes or changes code, documentation, or configuration, however small (implementation). Read-only lookups that only locate information (lookup). Design, planning, and analysis work (planning).',
     examples:
-      'Summarize this diff; tl;dr of that document; reformat this file; rename this variable everywhere; where is the config loader defined; explain briefly what this function does.',
+      'Summarize this diff; tl;dr of that document; reformat this file; rename this variable everywhere; explain briefly what this function does.',
     keywords: [
       'summarize',
       'summary',
@@ -135,12 +144,6 @@ const TIER_CRITERIA: Record<RouterTier, TypesafeCriterion> = {
       'rename',
       'rewrite',
       'explain briefly',
-      'where is',
-      'which file',
-      'show me',
-      'list',
-      'find',
-      'grep',
       'fast',
       'cheap',
       'quick',
@@ -152,6 +155,15 @@ const TIER_CRITERIA: Record<RouterTier, TypesafeCriterion> = {
       'tiny',
       'small',
     ],
+  },
+  lookup: {
+    covers:
+      'Read-only lookups: where something lives, which files match a pattern, and quick factual checks against the codebase or conversation. The answer locates information and adds no new text beyond it.',
+    not_for:
+      'Any request that writes or changes code, documentation, or configuration (implementation). Explanations, summaries, and text transforms (summary). Design, planning, and analysis work (planning).',
+    examples:
+      'Where is the config loader defined; which file exports the map; show me the models that match.',
+    keywords: ['where is', 'which file', 'show me', 'list', 'find', 'grep'],
   },
 };
 
@@ -189,10 +201,10 @@ export interface TypesafeNoulQuestion {
 }
 
 export interface TypesafeQuestions {
-  tier: {
+  work_type: {
     type: 'choice';
     instructions: string;
-    criteria: Record<RouterTier, TypesafeCriterion>;
+    criteria: Record<WireWorkType, TypesafeCriterion>;
   };
   long_request: TypesafeNoulQuestion;
   structured_request: TypesafeNoulQuestion;
@@ -200,14 +212,14 @@ export interface TypesafeQuestions {
 }
 
 /**
- * Pure: the fixed question set for every typesafe turn — one tier choice
- * (contrastive criteria) plus three atomic signal questions (D5).
+ * Pure: the fixed question set for every typesafe turn — one work-type
+ * choice (contrastive criteria) plus three atomic signal questions (D5).
  */
 export const buildTypesafeQuestions = (): TypesafeQuestions => ({
-  tier: {
+  work_type: {
     type: 'choice',
-    instructions: 'Which router tier fits the latest request',
-    criteria: TIER_CRITERIA,
+    instructions: 'Which work type fits the latest request',
+    criteria: WORK_TYPE_CRITERIA,
   },
   long_request: {
     type: 'noul',
@@ -278,23 +290,24 @@ const readTypesafeSignals = (
 
 /**
  * Pure: response body -> ClassifierResult. Returns undefined when the body
- * carries no usable tier answer or no numeric confidence; the caller records
- * that as a 'json-invalid' failure instead of degrading silently (FR3/FR4).
+ * carries no usable work-type answer or no numeric confidence; the caller
+ * records that as a 'json-invalid' failure instead of degrading silently
+ * (FR3/FR4).
  */
 export const mapTypesafeResponse = (
   body: unknown,
 ): ClassifierResult | undefined => {
   const answers = (body as { answers?: Record<string, unknown> } | null)
     ?.answers;
-  const tierAnswer = answers?.tier as
+  const workTypeAnswer = answers?.work_type as
     | { type?: string; choice?: unknown; confidence?: unknown }
     | undefined;
-  const choice = tierAnswer?.choice;
+  const choice = workTypeAnswer?.choice;
   if (typeof choice !== 'string') return undefined;
-  const tierRaw = choice.trim().toLowerCase();
-  if (!isRouterTier(tierRaw)) return undefined;
+  const workTypeRaw = choice.trim().toLowerCase();
+  if (!isRouterWorkType(workTypeRaw)) return undefined;
 
-  const confidenceNumeric = tierAnswer?.confidence;
+  const confidenceNumeric = workTypeAnswer?.confidence;
   if (
     typeof confidenceNumeric !== 'number' ||
     Number.isNaN(confidenceNumeric) ||
@@ -303,13 +316,15 @@ export const mapTypesafeResponse = (
     return undefined;
   }
 
-  const tier: RouterTier = tierRaw;
+  const workType: RouterWorkType = workTypeRaw;
+  const tier = WORK_TYPE_TO_TIER[workType];
   return {
     tier,
+    workType,
     confidence: toConfidenceLevel(confidenceNumeric),
     confidenceNumeric,
     reasoning:
-      `Jev classified the turn as ${tier} (confidence ${confidenceNumeric.toFixed(2)}).` +
+      `Jev classified the turn as ${workType} (${tier} tier, confidence ${confidenceNumeric.toFixed(2)}).` +
       readTypesafeSignals(answers),
     rawText: JSON.stringify(answers),
     failureReason: 'success',
@@ -420,7 +435,7 @@ export const runTypesafeClassifier = async (
   if (lastFailure === 'json-invalid') {
     return {
       reasoning:
-        'Jev answered but the response carried no usable tier and numeric confidence.',
+        'Jev answered but the response carried no usable work type and numeric confidence.',
       rawText: lastRawBody,
       failureReason: 'json-invalid',
     };

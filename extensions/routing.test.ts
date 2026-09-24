@@ -24,8 +24,10 @@ import type {
   RouterProfile,
   RoutingRule,
   RouterTier,
+  RouterWorkType,
   ClassifierResult,
 } from './types';
+import { WORK_TYPE_TO_TIER } from './config';
 
 vi.mock('@earendil-works/pi-ai/compat', () => ({
   streamSimple: vi.fn(),
@@ -780,6 +782,234 @@ describe('routing.ts', () => {
       });
     });;
 
+    describe('FR4 floor-gated differs merge', () => {
+      const criterion = (
+        workType: RouterWorkType,
+        n: number,
+      ): ClassifierResult => ({
+        tier: WORK_TYPE_TO_TIER[workType],
+        workType,
+        confidence: n >= 0.8 ? 'high' : n >= 0.5 ? 'medium' : 'low',
+        confidenceNumeric: n,
+        reasoning: 'Jev classified.',
+        rawText: 'answers',
+        failureReason: 'success',
+      });
+      const ruleHitMedium = {
+        tier: 'medium' as RouterTier,
+        reasoning: 'rule medium',
+      };
+      const mergeCtx = (): Context => ({
+        messages: [
+          { role: 'user', content: 'continue the work', timestamp: Date.now() },
+        ],
+      });
+
+      it('FR4: lookup at 0.86 pulls below the medium rule', () => {
+        const decision = decideRouting(
+          mergeCtx(), 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          criterion('lookup', 0.86),
+          ruleHitMedium,
+        );
+        expect(decision.tier).toBe('low');
+        expect(decision.isClassifier).toBe(true);
+        expect(decision.isRuleMatched).toBeFalsy();
+        expect(decision.confidence).toBe('high');
+        expect(decision.classifierTier).toBe('low');
+        expect(decision.classifierCriterion).toBe('lookup');
+        expect(decision.vetoOutcome).toBe('classifier-wins');
+      });
+
+      it('FR4 boundary: lookup at exactly 0.85 clears the floor and wins', () => {
+        const decision = decideRouting(
+          mergeCtx(), 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          criterion('lookup', 0.85),
+          ruleHitMedium,
+        );
+        expect(decision.tier).toBe('low');
+        expect(decision.isClassifier).toBe(true);
+      });
+
+      it('FR4 under-floor: lookup at 0.84 loses to the rule', () => {
+        const decision = decideRouting(
+          mergeCtx(), 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          criterion('lookup', 0.84),
+          ruleHitMedium,
+        );
+        expect(decision.tier).toBe('medium');
+        expect(decision.isRuleMatched).toBe(true);
+        expect(decision.isClassifier).toBeFalsy();
+        expect(decision.classifierAttempted).toBe(true);
+        expect(decision.classifierCriterion).toBe('lookup');
+      });
+
+      it('FR4 equal-tier: certainty alone does not displace an equal rule', () => {
+        const decision = decideRouting(
+          mergeCtx(), 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          criterion('implementation', 0.9),
+          ruleHitMedium,
+        );
+        expect(decision.tier).toBe('medium');
+        expect(decision.isRuleMatched).toBe(true);
+        expect(decision.isClassifier).toBeFalsy();
+      });
+
+      it('FR4 word fallback (chat path): high-confidence low answer pulls below the rule', () => {
+        const decision = decideRouting(
+          mergeCtx(), 'p', profile, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          {
+            tier: 'low',
+            workType: 'lookup',
+            confidence: 'high',
+            reasoning: 'Simple lookup.',
+            rawText: 'Work type: lookup',
+            failureReason: 'success',
+          },
+          ruleHitMedium,
+        );
+        expect(decision.tier).toBe('low');
+        expect(decision.isClassifier).toBe(true);
+        expect(decision.confidenceNumeric).toBeUndefined();
+      });
+    });
+
+    describe('FR8 heuristic classify + nudge', () => {
+      // Single-line filler (space-joined, so multiLinePrompt stays false;
+      // no keyword from any heuristic set). highThreshold is 120 with no
+      // previous decision, so the block repeats 3x: 124 words seeded.
+      const longWords = (seed: string): string =>
+        [
+          seed,
+          ...Array.from({ length: 3 }, () => [
+            'i wonder about some random topic that doesnt match any particular',
+            'keyword category here today now plus more filler words that keep',
+            'going well past the forty word threshold for complexity detection',
+            'purposes entirely and safely still further along today now',
+          ]).flat(),
+        ].join(' ');
+
+      it('FR8: summary beats complexity — a long summarize request stays low', () => {
+        const content = longWords('summarize');
+        expect(countWords(content)).toBeGreaterThanOrEqual(120);
+        const context: Context = {
+          messages: [{ role: 'user', content, timestamp: Date.now() }],
+        };
+        const decision = decideRouting(context, 'p', profile, undefined);
+        expect(decision.tier).toBe('low');
+        expect(decision.phase).toBe('lightweight');
+        expect(decision.reasoning).toBe(
+          'Detected summary or lightweight transformation keywords.',
+        );
+      });
+
+      it('FR8: complexity raises an implementation prompt to planning', () => {
+        const context: Context = {
+          messages: [
+            {
+              role: 'user',
+              content: longWords('fix'),
+              timestamp: Date.now(),
+            },
+          ],
+        };
+        const decision = decideRouting(context, 'p', profile, undefined);
+        expect(decision.tier).toBe('high');
+        expect(decision.phase).toBe('planning');
+        expect(decision.reasoning).toContain('high-complexity');
+      });
+
+      it('FR8: complexity raises a multi-line lookup to planning', () => {
+        const context: Context = {
+          messages: [
+            {
+              role: 'user',
+              content:
+                'where is the config\nplease tell me the location\nof the loader module\nin this repository',
+              timestamp: Date.now(),
+            },
+          ],
+        };
+        const decision = decideRouting(context, 'p', profile, undefined);
+        expect(decision.tier).toBe('high');
+        expect(decision.phase).toBe('planning');
+      });
+
+      it('FR8: a short read-only lookup maps to low', () => {
+        const context: Context = {
+          messages: [
+            {
+              role: 'user',
+              content: 'where is the config loader defined',
+              timestamp: Date.now(),
+            },
+          ],
+        };
+        const decision = decideRouting(context, 'p', profile, undefined);
+        expect(decision.tier).toBe('low');
+        expect(decision.phase).toBe('lightweight');
+        expect(decision.reasoning).toBe(
+          'Detected a short read-only lookup request.',
+        );
+      });
+
+      it('FR8: an unknown long prompt maps to planning through the complexity nudge', () => {
+        const context: Context = {
+          messages: [
+            {
+              role: 'user',
+              content: longWords('hello'),
+              timestamp: Date.now(),
+            },
+          ],
+        };
+        const decision = decideRouting(context, 'p', profile, undefined);
+        expect(decision.tier).toBe('high');
+        expect(decision.phase).toBe('planning');
+        expect(decision.reasoning).toContain('high-complexity');
+      });
+
+      it('FR8: an unknown short prompt maps to summary through the short nudge', () => {
+        const context: Context = {
+          messages: [
+            { role: 'user', content: 'hi there', timestamp: Date.now() },
+          ],
+        };
+        const decision = decideRouting(context, 'p', profile, undefined);
+        expect(decision.tier).toBe('low');
+        expect(decision.phase).toBe('lightweight');
+        expect(decision.reasoning).toBe('Detected a short bounded request.');
+      });
+
+      it('FR8: an unknown prompt with no nudge keeps medium, the previous phase, and the default reasoning', () => {
+        const previous = buildRoutingDecision(
+          'p',
+          profile,
+          'low',
+          'lightweight',
+          'Previous lightweight',
+        );
+        const context: Context = {
+          messages: [
+            {
+              role: 'user',
+              content:
+                'i wonder about some random topic that doesnt match anything here today now',
+              timestamp: Date.now(),
+            },
+          ],
+        };
+        const decision = decideRouting(context, 'p', profile, previous);
+        expect(decision.tier).toBe('medium');
+        expect(decision.phase).toBe('lightweight');
+        expect(decision.reasoning).toContain('Defaulted to medium');
+      });
+    });
+
     it('veto: ultrathink + classifier low (high confidence) → classifier wins (confidence-aware veto)', () => {
       const context: Context = {
         messages: [
@@ -1038,9 +1268,9 @@ describe('routing.ts', () => {
   describe('parseClassifierOutput', () => {
     it('parses clean 3-line format', () => {
       const result = parseClassifierOutput(
-        'Tier: high\nConfidence: high\nReasoning: Needs deep reasoner.',
+        'Work type: planning\nConfidence: high\nReasoning: Needs deep reasoner.',
       );
-      expect(result.tier).toBe('high');
+      expect(result.workType).toBe('planning');
       expect(result.confidence).toBe('high');
       expect(result.reasoning).toBe('Needs deep reasoner.');
       expect(result.failureReason).toBe('success');
@@ -1048,71 +1278,89 @@ describe('routing.ts', () => {
 
     it('parses 2-line format (missing confidence) — defaults medium', () => {
       const result = parseClassifierOutput(
-        'Tier: high\nReasoning: Complex task.',
+        'Work type: planning\nReasoning: Complex task.',
       );
-      expect(result.tier).toBe('high');
+      expect(result.workType).toBe('planning');
       expect(result.confidence).toBe('medium');
       expect(result.failureReason).toBe('success');
     });
 
-    it('strips markdown bold (**Tier:**)', () => {
+    it('strips markdown bold (**Work type:**)', () => {
       const result = parseClassifierOutput(
-        '**Tier:** high\n**Confidence:** high\n**Reasoning:** Deep.',
+        '**Work type:** planning\n**Confidence:** high\n**Reasoning:** Deep.',
       );
-      expect(result.tier).toBe('high');
+      expect(result.workType).toBe('planning');
       expect(result.confidence).toBe('high');
     });
 
-    it('strips trailing punctuation (high.)', () => {
-      const result = parseClassifierOutput('Tier: high.\nReasoning: Hard.');
-      expect(result.tier).toBe('high');
-    });
-
-    it('handles multi-word tier (high priority → high)', () => {
+    it('strips trailing punctuation (planning.)', () => {
       const result = parseClassifierOutput(
-        'Tier: high priority\nReasoning: Architectural.',
+        'Work type: planning.\nReasoning: Hard.',
       );
-      expect(result.tier).toBe('high');
+      expect(result.workType).toBe('planning');
     });
 
-    it('handles empty tier value (Tier:)', () => {
-      const result = parseClassifierOutput('Tier: \nReasoning: none.');
+    it('handles multi-word answer (planning priority → planning)', () => {
+      const result = parseClassifierOutput(
+        'Work type: planning priority\nReasoning: Architectural.',
+      );
+      expect(result.workType).toBe('planning');
+    });
+
+    it('handles empty work-type value (Work type:)', () => {
+      const result = parseClassifierOutput('Work type: \nReasoning: none.');
       expect(result.failureReason).toBe('unparseable');
-      expect(result.tier).toBeUndefined();
+      expect(result.workType).toBeUndefined();
     });
 
     it('handles \\r\\n line endings', () => {
       const result = parseClassifierOutput(
-        'Tier: high\r\nConfidence: low\r\nReasoning: Simple.',
+        'Work type: planning\r\nConfidence: low\r\nReasoning: Simple.',
       );
-      expect(result.tier).toBe('high');
+      expect(result.workType).toBe('planning');
       expect(result.confidence).toBe('low');
     });
 
-    it('handles partial final chunk (Tier: hi)', () => {
-      const result = parseClassifierOutput('Tier: hi');
+    it('handles partial final chunk (Work type: plan)', () => {
+      const result = parseClassifierOutput('Work type: plan');
       expect(result.failureReason).toBe('unparseable');
     });
 
     it("preserves colons in reasoning (It's: complicated)", () => {
       const result = parseClassifierOutput(
-        "Tier: medium\nReasoning: It's: complicated.",
+        "Work type: implementation\nReasoning: It's: complicated.",
       );
-      expect(result.tier).toBe('medium');
+      expect(result.workType).toBe('implementation');
       expect(result.reasoning).toBe("It's: complicated.");
     });
 
-    it('returns unparseable for no tier line', () => {
+    it('returns unparseable for no work-type line', () => {
       const result = parseClassifierOutput('Invalid response format');
       expect(result.failureReason).toBe('unparseable');
     });
 
+    it('returns unparseable for the old tier wire (Tier: high)', () => {
+      const result = parseClassifierOutput(
+        'Tier: high\nConfidence: high\nReasoning: Deep.',
+      );
+      expect(result.failureReason).toBe('unparseable');
+      expect(result.workType).toBeUndefined();
+    });
+
+    it('accepts a literal unknown answer (guard passes, FR7 parity with Jev)', () => {
+      const result = parseClassifierOutput(
+        'Work type: unknown\nReasoning: Ambiguous.',
+      );
+      expect(result.workType).toBe('unknown');
+      expect(result.failureReason).toBe('success');
+    });
+
     it('defaults confidence to medium on invalid value', () => {
       const result = parseClassifierOutput(
-        'Tier: low\nConfidence: extreme\nReasoning: Fast.',
+        'Work type: lookup\nConfidence: extreme\nReasoning: Fast.',
       );
       expect(result.confidence).toBe('medium');
-      expect(result.tier).toBe('low');
+      expect(result.workType).toBe('lookup');
     });
   });
 
@@ -1146,7 +1394,7 @@ describe('routing.ts', () => {
       const mockStream = (async function* () {
         yield {
           type: 'text_delta',
-          delta: 'Tier: high\nConfidence: high\nReasoning: Deep.',
+          delta: 'Work type: planning\nConfidence: high\nReasoning: Deep.',
         };
       })();
       vi.mocked(streamSimple).mockReturnValue(mockStream as any);
@@ -1160,11 +1408,46 @@ describe('routing.ts', () => {
       );
       expect(result).toEqual({
         tier: 'high',
+        workType: 'planning',
         confidence: 'high',
         reasoning: 'Deep.',
-        rawText: 'Tier: high\nConfidence: high\nReasoning: Deep.',
+        rawText: 'Work type: planning\nConfidence: high\nReasoning: Deep.',
         failureReason: 'success',
       });
+    });
+
+    it('maps an unknown chat answer to the medium tier through the shared map', async () => {
+      const mockStream = (async function* () {
+        yield {
+          type: 'text_delta',
+          delta: 'Work type: unknown\nConfidence: high\nReasoning: Ambiguous.',
+        };
+      })();
+      vi.mocked(streamSimple).mockReturnValue(mockStream as any);
+      const result = await runClassifier(
+        ['openai/gpt-4o'],
+        mockRegistry,
+        context,
+      );
+      expect(result?.workType).toBe('unknown');
+      expect(result?.tier).toBe('medium');
+      expect(result?.failureReason).toBe('success');
+    });
+
+    it('returns undefined when the stream answers on the old tier wire', async () => {
+      const mockStream = (async function* () {
+        yield {
+          type: 'text_delta',
+          delta: 'Tier: high\nConfidence: high\nReasoning: Deep.',
+        };
+      })();
+      vi.mocked(streamSimple).mockReturnValue(mockStream as any);
+      const result = await runClassifier(
+        ['openai/gpt-4o'],
+        mockRegistry,
+        context,
+      );
+      expect(result).toBeUndefined();
     });
 
     it('returns undefined when all refs fail (model-not-found)', async () => {
@@ -1202,7 +1485,7 @@ describe('routing.ts', () => {
       const mockStream = (async function* () {
         yield {
           type: 'text_delta',
-          delta: 'Tier: low\nConfidence: high\nReasoning: Simple.',
+          delta: 'Work type: lookup\nConfidence: high\nReasoning: Simple.',
         };
       })();
       vi.mocked(streamSimple).mockReturnValue(mockStream as any);
@@ -1227,7 +1510,7 @@ describe('routing.ts', () => {
         return (async function* () {
           yield {
             type: 'text_delta',
-            delta: 'Tier: medium\nConfidence: medium\nReasoning: Normal.',
+            delta: 'Work type: implementation\nConfidence: medium\nReasoning: Normal.',
           };
         })();
       }) as any);
@@ -1245,7 +1528,7 @@ describe('routing.ts', () => {
       vi.mocked(streamSimple).mockImplementation((() => {
         callCount++;
         return (async function* () {
-          yield { type: 'text_delta', delta: 'Tier: high' };
+          yield { type: 'text_delta', delta: 'Work type: planning' };
           yield {
             type: 'error',
             error: { errorMessage: 'mid-stream failure' },
@@ -1273,7 +1556,7 @@ describe('routing.ts', () => {
         return (async function* () {
           yield {
             type: 'text_delta',
-            delta: 'Tier: medium\nConfidence: medium\nReasoning: Normal.',
+            delta: 'Work type: implementation\nConfidence: medium\nReasoning: Normal.',
           };
         })();
       }) as any);
@@ -1346,7 +1629,7 @@ describe('routing.ts', () => {
 
       const okBody = (choice: string, confidence: number) => {
         const body = JSON.stringify({
-          answers: { tier: { type: 'choice', choice, confidence } },
+          answers: { work_type: { type: 'choice', choice, confidence } },
         });
         return {
           ok: true,
@@ -1354,6 +1637,28 @@ describe('routing.ts', () => {
           json: async () => JSON.parse(body),
         };
       };
+
+      // HEAD's TIER_CRITERIA held 66 keyword tokens (high 25, medium 15,
+      // low 26). The work-type re-key must preserve the multiset exactly.
+      const HEAD_KEYWORD_TOKENS = [
+        // high -> planning (16 planning words + 9 high-hint words)
+        'plan', 'planning', 'architecture', 'design', 'tradeoff',
+        'trade-off', 'research', 'investigate', 'root cause', 'analyze',
+        'analysis', 'migration', 'strategy', 'compare', 'options',
+        'approach', 'ultrathink', 'think hard', 'deep', 'thoroughly',
+        'comprehensive', 'robust', 'best', 'highest quality', 'step by step',
+        // medium -> implementation (unchanged 15)
+        'implement', 'code', 'fix', 'update', 'edit', 'write', 'refactor',
+        'add tests', 'patch', 'change', 'apply', 'continue', 'resume',
+        'make the changes', 'go ahead',
+        // low -> summary (10 summary words + 10 low-hint words)
+        'summarize', 'summary', 'changelog', 'recap', 'tl;dr', 'reformat',
+        'format', 'rename', 'rewrite', 'explain briefly', 'fast', 'cheap',
+        'quick', 'quickly', 'brief', 'briefly', 'one sentence', 'one line',
+        'tiny', 'small',
+        // low -> lookup (6 pure search words)
+        'where is', 'which file', 'show me', 'list', 'find', 'grep',
+      ];
 
       const runJev = (refs: string[], signal?: AbortSignal) =>
         runClassifier(
@@ -1376,14 +1681,15 @@ describe('routing.ts', () => {
         });
       });
 
-      it('maps a Jev choice answer to a router tier', async () => {
+      it('maps a Jev work_type answer to a router tier through the shared map', async () => {
         vi.mocked(readFileSync).mockReturnValue('test-key\n');
         const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
-          okBody('high', 0.92),
+          okBody('planning', 0.92),
         );
         vi.stubGlobal('fetch', fetchMock);
 
         const result = await runJev(['typesafe/jev-latest']);
+        expect(result?.workType).toBe('planning');
         expect(result?.tier).toBe('high');
         expect(result?.confidence).toBe('high');
         expect(result?.failureReason).toBe('success');
@@ -1393,7 +1699,62 @@ describe('routing.ts', () => {
         expect(init.method).toBe('POST');
         const sent = JSON.parse(String(init.body));
         expect(sent.model).toBe('jev-latest');
-        expect(sent.questions.tier.type).toBe('choice');
+        expect(sent.questions.work_type.type).toBe('choice'); // FR7 round-trip
+      });
+
+      it('maps every wire work type to its fixed tier target (FR3/FR7)', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        const cases = [
+          ['planning', 'high'],
+          ['implementation', 'medium'],
+          ['summary', 'low'],
+          ['lookup', 'low'],
+        ] as const;
+        for (const [workType, tier] of cases) {
+          vi.stubGlobal(
+            'fetch',
+            vi.fn(async (_url: string, _init: RequestInit) =>
+              okBody(workType, 0.9),
+            ),
+          );
+          const result = await runJev(['typesafe/jev-latest']);
+          expect(result?.workType).toBe(workType);
+          expect(result?.tier).toBe(tier);
+        }
+      });
+
+      it('accepts a literal unknown answer and maps it to medium', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (_url: string, _init: RequestInit) =>
+            okBody('unknown', 0.9),
+          ),
+        );
+        const result = await runJev(['typesafe/jev-latest']);
+        expect(result?.workType).toBe('unknown');
+        expect(result?.tier).toBe('medium');
+        expect(result?.failureReason).toBe('success');
+      });
+
+      it('preserves the HEAD keyword multiset across the four criteria (66 tokens)', async () => {
+        vi.mocked(readFileSync).mockReturnValue('test-key\n');
+        const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
+          okBody('planning', 0.92),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        await runJev(['typesafe/jev-latest']);
+
+        const [, init] = fetchMock.mock.calls[0];
+        const sent = JSON.parse(String(init.body));
+        const sentTokens = (
+          ['planning', 'implementation', 'summary', 'lookup'] as const
+        ).flatMap(
+          (k) => sent.questions.work_type.criteria[k].keywords as string[],
+        );
+        expect(sentTokens).toHaveLength(66);
+        expect([...sentTokens].sort()).toEqual([...HEAD_KEYWORD_TOKENS].sort());
       });
 
       it('sends a Jev-native request: structured state, contrastive criteria, signal questions, no chat directive', async () => {
@@ -1416,19 +1777,24 @@ describe('routing.ts', () => {
         expect(sent.state.current_phase).toBeUndefined();
         // No chat-format directive anywhere in the body.
         expect(JSON.stringify(sent)).not.toContain('Return your decision');
-        // FR2: contrastive criteria, identical field names across tiers.
-        for (const tier of ['high', 'medium', 'low'] as const) {
-          expect(Object.keys(sent.questions.tier.criteria[tier])).toEqual([
-            'covers',
-            'not_for',
-            'examples',
-            'keywords',
-          ]);
+        // FR2: contrastive criteria, identical field names across work types.
+        for (const workType of [
+          'planning',
+          'implementation',
+          'summary',
+          'lookup',
+        ] as const) {
           expect(
-            sent.questions.tier.criteria[tier].keywords.length,
-          ).toBeGreaterThan(10);
+            Object.keys(sent.questions.work_type.criteria[workType]),
+          ).toEqual(['covers', 'not_for', 'examples', 'keywords']);
         }
-        expect(sent.questions.tier.type).toBe('choice');
+        expect(Object.keys(sent.questions.work_type.criteria)).toEqual([
+          'planning',
+          'implementation',
+          'summary',
+          'lookup',
+        ]);
+        expect(sent.questions.work_type.type).toBe('choice');
         // FR2/D13: atomic Noul signal questions ride the same POST.
         expect(sent.questions.long_request.type).toBe('noul');
         expect(Object.keys(sent.questions.long_request.criteria)).toEqual([
@@ -1451,7 +1817,7 @@ describe('routing.ts', () => {
           vi.stubGlobal(
             'fetch',
             vi.fn(async (_url: string, _init: RequestInit) =>
-              okBody('medium', confidence),
+              okBody('implementation', confidence),
             ),
           );
           const result = await runJev(['typesafe/jev-latest']);
@@ -1463,10 +1829,13 @@ describe('routing.ts', () => {
         vi.mocked(readFileSync).mockReturnValue('test-key\n');
         vi.stubGlobal(
           'fetch',
-          vi.fn(async (_url: string, _init: RequestInit) => okBody('medium', 0.72)),
+          vi.fn(async (_url: string, _init: RequestInit) =>
+            okBody('implementation', 0.72),
+          ),
         );
 
         const result = await runJev(['typesafe/jev-latest']);
+        expect(result?.workType).toBe('implementation');
         expect(result?.tier).toBe('medium');
         expect(result?.confidenceNumeric).toBe(0.72);
         expect(result?.confidence).toBe('medium');
@@ -1483,6 +1852,7 @@ describe('routing.ts', () => {
         const result = await runJev(['typesafe/jev-latest']);
         expect(result?.failureReason).toBe('json-invalid');
         expect(result?.tier).toBeUndefined();
+        expect(result?.workType).toBeUndefined();
         expect(result?.rawText).toContain('gigantic');
       });
 
@@ -1490,7 +1860,11 @@ describe('routing.ts', () => {
         vi.mocked(readFileSync).mockReturnValue('test-key\n');
         const body = JSON.stringify({
           answers: {
-            tier: { type: 'choice', choice: 'high', confidence: 'high' },
+            work_type: {
+              type: 'choice',
+              choice: 'planning',
+              confidence: 'high',
+            },
           },
         });
         vi.stubGlobal(
@@ -1531,7 +1905,7 @@ describe('routing.ts', () => {
             status: 401,
             text: async () => '',
           })
-          .mockResolvedValueOnce(okBody('high', 0.9));
+          .mockResolvedValueOnce(okBody('planning', 0.9));
         vi.stubGlobal('fetch', fetchMock);
 
         const result = await runJev(['typesafe/first', 'typesafe/jev-latest']);
@@ -1555,7 +1929,7 @@ describe('routing.ts', () => {
 
       it('returns undefined when no key is present (never ran)', async () => {
         const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
-          okBody('high', 0.9),
+          okBody('planning', 0.9),
         );
         vi.stubGlobal('fetch', fetchMock);
 
@@ -1598,7 +1972,11 @@ describe('routing.ts', () => {
         vi.mocked(readFileSync).mockReturnValue('test-key\n');
         const body = JSON.stringify({
           answers: {
-            tier: { type: 'choice', choice: 'high', confidence: 0.91 },
+            work_type: {
+              type: 'choice',
+              choice: 'planning',
+              confidence: 0.91,
+            },
             long_request: { type: 'noul', noul: 0.91 },
             structured_request: { type: 'noul', noul: 0.88 },
             implementation_context: { type: 'noul', noul: 0.2 },
@@ -1623,7 +2001,7 @@ describe('routing.ts', () => {
       it('skips a ref without a provider slash and tries the next ref', async () => {
         vi.mocked(readFileSync).mockReturnValue('test-key\n');
         const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
-          okBody('high', 0.9),
+          okBody('planning', 0.9),
         );
         vi.stubGlobal('fetch', fetchMock);
 
@@ -1635,7 +2013,7 @@ describe('routing.ts', () => {
       it('returns undefined on an aborted signal without calling fetch', async () => {
         vi.mocked(readFileSync).mockReturnValue('test-key\n');
         const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
-          okBody('high', 0.9),
+          okBody('planning', 0.9),
         );
         vi.stubGlobal('fetch', fetchMock);
 
@@ -1650,7 +2028,7 @@ describe('routing.ts', () => {
       it('reads the key from the agent dir key file', async () => {
         vi.mocked(readFileSync).mockReturnValue('file-key\n');
         const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
-          okBody('high', 0.9),
+          okBody('planning', 0.9),
         );
         vi.stubGlobal('fetch', fetchMock);
 
@@ -1665,7 +2043,7 @@ describe('routing.ts', () => {
       it('returns undefined when the key file holds no key', async () => {
         vi.mocked(readFileSync).mockReturnValue('\n');
         const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
-          okBody('high', 0.9),
+          okBody('planning', 0.9),
         );
         vi.stubGlobal('fetch', fetchMock);
 
@@ -1910,9 +2288,29 @@ describe('routing.ts', () => {
         wordCount: 1,
         multiLinePrompt: false,
       });
-      expect(prompt).toContain('Tier: [high|medium|low]');
+      expect(prompt).toContain(
+        'Work type: [planning|implementation|summary|lookup]',
+      );
       expect(prompt).toContain('Confidence: [high|medium|low]');
       expect(prompt).toContain('Reasoning: [one short sentence]');
+      expect(prompt).not.toContain('Tier: [high|medium|low]');
+    });
+
+    it('offers the four work-type choices, not tiers', () => {
+      const prompt = buildClassifierPrompt({
+        promptText: 'test',
+        historyText: '',
+        toolResultCount: 0,
+        wordCount: 1,
+        multiLinePrompt: false,
+      });
+      expect(prompt).toContain('- planning:');
+      expect(prompt).toContain('- implementation:');
+      expect(prompt).toContain('- summary:');
+      expect(prompt).toContain('- lookup:');
+      expect(prompt).not.toContain('- high:');
+      expect(prompt).not.toContain('- medium:');
+      expect(prompt).not.toContain('- low:');
     });
   });
 });

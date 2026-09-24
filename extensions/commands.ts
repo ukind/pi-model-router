@@ -449,6 +449,9 @@ export const registerCommands = (
         userCorrection: true,
         timestamp: Date.now(),
       };
+      if (state.lastDecision.classifierCriterion) {
+        entry.classifierCriterion = state.lastDecision.classifierCriterion;
+      }
       state.classifierCalibration = [
         ...state.classifierCalibration,
         entry,

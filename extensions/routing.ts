@@ -7,6 +7,7 @@ import type {
   RouterTier,
   RouterPhase,
   RouterProfile,
+  RouterWorkType,
   RoutingDecision,
   RoutingRule,
   RouterThinkingByTier,
@@ -15,7 +16,12 @@ import type {
   ConfidenceLevel,
   ClassifierPromptContext,
 } from './types';
-import { parseCanonicalModelRef, isRouterTier, ROUTER_TIERS } from './config';
+import {
+  parseCanonicalModelRef,
+  isRouterWorkType,
+  ROUTER_TIERS,
+  WORK_TYPE_TO_TIER,
+} from './config';
 import {
   DEFAULT_STALL_TIMEOUT_MS,
   CLASSIFIER_OVERRIDE_FLOOR,
@@ -198,12 +204,13 @@ export const buildRoutingDecision = (
  */
 export const buildClassifierPrompt = (ctx: ClassifierPromptContext): string => {
   const lines: string[] = [
-    'You are a model router classifier. Your job is to categorize the user\'s latest request into one of three tiers: "high", "medium", or "low".',
+    'You are a model router classifier. Your job is to categorize the user\'s latest request into one of four work types: "planning", "implementation", "summary", or "lookup".',
     '',
-    'Tiers:',
-    '- high: Architecture, design, planning, tradeoff analysis, broad debugging, large refactors, codebase research.',
-    '- medium: Implementation of a known plan, multi-file edits, normal coding work, focused debugging, tests/fixes.',
-    '- low: Summaries, changelogs, formatting, quick explanations, small bounded transforms, simple read-only lookup.',
+    'Work types:',
+    '- planning: Architecture, design, planning, tradeoff analysis, broad debugging, large refactors, codebase research.',
+    '- implementation: Implementation of a known plan, multi-file edits, normal coding work, focused debugging, tests/fixes.',
+    '- summary: Summaries, changelogs, formatting, quick explanations, small bounded text transforms.',
+    '- lookup: Read-only lookups that locate information and add no new text beyond it.',
     '',
   ];
 
@@ -221,7 +228,7 @@ export const buildClassifierPrompt = (ctx: ClassifierPromptContext): string => {
 
   if (ctx.hasImage) {
     lines.push(
-      'Note: The user has attached an image. Bias toward "high" or "medium" tier as lower tiers may not support vision capabilities.',
+      'Note: The user has attached an image. Bias toward "planning" or "implementation" as the models for "summary" and "lookup" may not support vision capabilities.',
     );
     lines.push('');
   }
@@ -248,19 +255,19 @@ export const buildClassifierPrompt = (ctx: ClassifierPromptContext): string => {
   }
 
   lines.push('Return your decision in exactly three lines:');
-  lines.push('Tier: [high|medium|low]');
+  lines.push('Work type: [planning|implementation|summary|lookup]');
   lines.push('Confidence: [high|medium|low]');
   lines.push('Reasoning: [one short sentence]');
   lines.push('');
 
   if (ctx.currentPhase === 'planning') {
     lines.push(
-      'Consider that the conversation is currently in a planning phase. Bias toward "high" unless the request is clearly a simple implementation or summary.',
+      'Consider that the conversation is currently in a planning phase. Bias toward "planning" unless the request is clearly a simple implementation or summary.',
     );
   }
   if (ctx.currentPhase === 'implementation') {
     lines.push(
-      'Consider that the conversation is currently in an implementation phase. Bias toward "medium" unless the request is clearly planning or a simple summary.',
+      'Consider that the conversation is currently in an implementation phase. Bias toward "implementation" unless the request is clearly planning or a simple summary.',
     );
   }
 
@@ -457,6 +464,7 @@ export const decideRouting = (
   let vetoReason: 'explicit-hint' | undefined;
   let classifierAttempted = false;
   let classifierTier: RouterTier | undefined;
+  let classifierCriterion: RouterWorkType | undefined;
   let vetoOutcome: 'classifier-wins' | 'veto-wins' | undefined;
   let vetoDisagreementMagnitude: number | undefined;
 
@@ -471,19 +479,16 @@ export const decideRouting = (
       ? classifierResult
       : undefined;
     if (ruleMatch && usableResult) {
-      // Rule + classifier both present: merge logic. Prefer the higher tier
-      // when the classifier clears the override floor (numeric first; word
-      // fallback keeps the chat path identical).
+      // Rule + classifier both present: merge logic. The classifier
+      // displaces the rule when its certainty clears the override floor
+      // (numeric first; word fallback keeps the chat path identical) and
+      // its mapped tier differs from the rule's tier — above or below (FR4).
       classifierAttempted = true;
       classifierTier = usableResult.tier;
-      const tierRank: Record<RouterTier, number> = {
-        low: 1,
-        medium: 2,
-        high: 3,
-      };
+      classifierCriterion = usableResult.workType;
       if (
         isHighConfidence(usableResult, CLASSIFIER_OVERRIDE_FLOOR) &&
-        tierRank[usableResult.tier] > tierRank[ruleMatch.tier]
+        usableResult.tier !== ruleMatch.tier
       ) {
         isClassifier = true;
         tier = usableResult.tier;
@@ -507,6 +512,7 @@ export const decideRouting = (
     } else if (usableResult) {
       classifierAttempted = true;
       classifierTier = usableResult.tier;
+      classifierCriterion = usableResult.workType;
 
       // Low confidence: degrade to heuristic branch
       if (isLowConfidence(usableResult)) {
@@ -577,68 +583,98 @@ export const decideRouting = (
             : 0),
       );
 
+      // Step 1 — classify: keyword arms only (hints preempt, summary beats
+      // planning). Complexity signals are nudges, not classify arms. Every
+      // non-unknown arm pairs its work type with the HEAD reasoning string,
+      // so outcomes stay identical for identical inputs.
+      let workType: RouterWorkType = 'unknown';
+      let heuristicReasoning = reasoning;
+
       if (containsAnyWord(prompt, explicitHighHints)) {
-        phase = 'planning';
-        tier = 'high';
-        reasoning =
+        workType = 'planning';
+        heuristicReasoning =
           'Detected an explicit request for deeper or higher-quality reasoning.';
       } else if (containsAnyWord(prompt, explicitLowHints)) {
-        phase = 'lightweight';
-        tier = 'low';
-        reasoning =
+        workType = 'summary';
+        heuristicReasoning =
           'Detected an explicit request for a faster or lighter response.';
       } else if (containsAnyWord(prompt, summaryKeywords)) {
-        phase = 'lightweight';
-        tier = 'low';
-        reasoning = 'Detected summary or lightweight transformation keywords.';
+        workType = 'summary';
+        heuristicReasoning =
+          'Detected summary or lightweight transformation keywords.';
       } else if (
         containsAnyWord(prompt, planningKeywords) ||
-        prompt.startsWith('why ') ||
-        wordCount >= highThreshold ||
-        multiLinePrompt
+        prompt.startsWith('why ')
       ) {
-        phase = 'planning';
-        tier = 'high';
-        reasoning =
+        workType = 'planning';
+        heuristicReasoning =
           previousDecision?.phase === 'planning'
             ? 'Continued planning phase based on complexity or keywords.'
             : 'Detected planning, broad analysis, or a high-complexity request.';
       } else if (containsAnyWord(prompt, implementationKeywords)) {
-        phase = 'implementation';
-        tier = 'medium';
-        reasoning =
+        workType = 'implementation';
+        heuristicReasoning =
           'Detected implementation-oriented work with bounded execution scope.';
       } else if (
         containsAnyWord(prompt, lookupKeywords) &&
         wordCount <= 24 &&
         toolResultCount === 0
       ) {
-        phase = 'lightweight';
-        tier = 'low';
-        reasoning = 'Detected a short read-only lookup request.';
-      } else if (
-        previousDecision?.phase === 'planning' &&
-        toolResultCount === 0 &&
-        wordCount > lowThreshold
-      ) {
-        phase = 'planning';
-        tier = 'high';
-        reasoning =
-          'Kept the planning-phase bias because the conversation still looks exploratory.';
-      } else if (
-        toolResultCount > 0 ||
-        previousDecision?.phase === 'implementation' ||
-        recentConversation.includes('plan:')
-      ) {
-        phase = 'implementation';
-        tier = 'medium';
-        reasoning =
-          'Detected active implementation work from prior tools or recent plan execution context.';
-      } else if (wordCount <= lowThreshold) {
-        phase = 'lightweight';
-        tier = 'low';
-        reasoning = 'Detected a short bounded request.';
+        workType = 'lookup';
+        heuristicReasoning = 'Detected a short read-only lookup request.';
       }
+
+      // Step 2 — complexity nudge (the raise): a long or multi-line turn
+      // raises every classification except summary (HEAD arm order: the
+      // complexity arm sat below summary, above implementation/lookup) and
+      // except planning (nothing to raise; high-hint planning keeps its own
+      // reasoning string).
+      if (
+        (wordCount >= highThreshold || multiLinePrompt) &&
+        workType !== 'summary' &&
+        workType !== 'planning'
+      ) {
+        workType = 'planning';
+        heuristicReasoning =
+          previousDecision?.phase === 'planning'
+            ? 'Continued planning phase based on complexity or keywords.'
+            : 'Detected planning, broad analysis, or a high-complexity request.';
+      }
+
+      // Step 3 — unknown-only nudges, in HEAD order: phase bias, then
+      // tool/plan context, then shortness. These never displace a keyword
+      // classification.
+      if (workType === 'unknown') {
+        if (
+          previousDecision?.phase === 'planning' &&
+          toolResultCount === 0 &&
+          wordCount > lowThreshold
+        ) {
+          workType = 'planning';
+          heuristicReasoning =
+            'Kept the planning-phase bias because the conversation still looks exploratory.';
+        } else if (
+          toolResultCount > 0 ||
+          previousDecision?.phase === 'implementation' ||
+          recentConversation.includes('plan:')
+        ) {
+          workType = 'implementation';
+          heuristicReasoning =
+            'Detected active implementation work from prior tools or recent plan execution context.';
+        } else if (wordCount <= lowThreshold) {
+          workType = 'summary';
+          heuristicReasoning = 'Detected a short bounded request.';
+        }
+      }
+
+      // Step 4 — convert through the shared map and apply (FR8). The
+      // 'unknown' path keeps tier medium, the previous phase, and the
+      // default reasoning — heuristicReasoning still holds it (FR1).
+      if (workType !== 'unknown') {
+        tier = WORK_TYPE_TO_TIER[workType];
+        phase = phaseForTier(tier);
+      }
+      reasoning = heuristicReasoning;
     }
   }
 
@@ -687,6 +723,9 @@ export const decideRouting = (
   if (classifierTier) {
     decision.classifierTier = classifierTier;
   }
+  if (classifierCriterion) {
+    decision.classifierCriterion = classifierCriterion;
+  }
   if (vetoOutcome) {
     decision.vetoOutcome = vetoOutcome;
   }
@@ -716,7 +755,7 @@ export const decideRouting = (
 export const parseClassifierOutput = (
   rawText: string,
 ): {
-  tier?: RouterTier;
+  workType?: RouterWorkType;
   confidence: ConfidenceLevel;
   reasoning: string;
   failureReason: ClassifierFailureReason;
@@ -729,11 +768,11 @@ export const parseClassifierOutput = (
       .trim();
 
   const lines = normalized.split('\n').map(stripMarkdown);
-  const tierLine = lines.find((l) => /^tier:\s*/i.test(l));
+  const workTypeLine = lines.find((l) => /^work type:\s*/i.test(l));
   const confidenceLine = lines.find((l) => /^confidence:\s*/i.test(l));
   const reasoningLine = lines.find((l) => /^reasoning:\s*/i.test(l));
 
-  if (!tierLine) {
+  if (!workTypeLine) {
     return {
       confidence: 'medium',
       reasoning: '',
@@ -741,12 +780,12 @@ export const parseClassifierOutput = (
     };
   }
 
-  const tierRaw = tierLine
-    .replace(/^tier:\s*/i, '')
+  const workTypeRaw = workTypeLine
+    .replace(/^work type:\s*/i, '')
     .trim()
     .toLowerCase();
-  const tierWord = tierRaw.split(/\s+/)[0].replace(/[.!;,]+$/, '');
-  if (!isRouterTier(tierWord)) {
+  const workTypeWord = workTypeRaw.split(/\s+/)[0].replace(/[.!;,]+$/, '');
+  if (!isRouterWorkType(workTypeWord)) {
     return {
       confidence: 'medium',
       reasoning: '',
@@ -772,7 +811,12 @@ export const parseClassifierOutput = (
     if (reasoningText.trim()) reasoning = reasoningText.trim();
   }
 
-  return { tier: tierWord, confidence, reasoning, failureReason: 'success' };
+  return {
+    workType: workTypeWord,
+    confidence,
+    reasoning,
+    failureReason: 'success',
+  };
 };
 
 /**
@@ -989,8 +1033,10 @@ export const runClassifier = async (
         return undefined;
       }
 
+      const workType = parsed.workType!;
       return {
-        tier: parsed.tier!,
+        tier: WORK_TYPE_TO_TIER[workType],
+        workType,
         confidence: parsed.confidence,
         reasoning: parsed.reasoning,
         rawText: fullText,

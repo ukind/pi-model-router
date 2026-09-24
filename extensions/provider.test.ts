@@ -620,6 +620,92 @@ describe('provider.ts', () => {
       );
     });
 
+    it('preserves classifierCriterion through the image promotion rebuild', async () => {
+      // Jev classifier: implementation (medium) at 0.92 confidence — the
+      // classifier branch wins, so the pre-promotion decision carries
+      // classifierCriterion 'implementation'.
+      mockState.currentConfig.classifierModel = {
+        backend: 'typesafe',
+        model: 'typesafe/jev-latest',
+      };
+      vi.mocked(readFileSync).mockReturnValue('test-key\n');
+      const body = JSON.stringify({
+        answers: {
+          work_type: {
+            type: 'choice',
+            choice: 'implementation',
+            confidence: 0.92,
+          },
+        },
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_url: string, _init: RequestInit) => ({
+          ok: true,
+          text: async () => body,
+          json: async () => JSON.parse(body),
+        })),
+      );
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      vi.mocked(streamSimple).mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'done' };
+        })() as any,
+      );
+
+      // Medium tier model and fallback lack image support; high tier supports.
+      mockState.currentModelRegistry.find = (
+        provider: string,
+        modelId: string,
+      ) => {
+        if (modelId === 'gpt-4o') {
+          return { provider, id: modelId, input: ['text', 'image'] };
+        }
+        return { provider, id: modelId, input: ['text'] };
+      };
+
+      const model = {
+        id: 'balanced',
+        api: 'router-api',
+        provider: 'router',
+      } as any;
+      const context = {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text' as const, text: 'implement the fix' },
+              {
+                type: 'image' as const,
+                image: { mimeType: 'image/png', data: 'data' },
+              },
+            ],
+            timestamp: Date.now(),
+          },
+        ],
+      } as any;
+
+      registeredProviderOptions.streamSimple(model, context);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(mockState.lastDecision.tier).toBe('high');
+      expect(mockState.lastDecision.reasoning).toContain(
+        'Forced high tier because the originally routed medium tier does not support image attachments',
+      );
+      // The criterion rode the promotion rebuild (FR11).
+      expect(mockState.lastDecision.classifierCriterion).toBe(
+        'implementation',
+      );
+      expect(mockState.lastDecision.classifierTier).toBe('medium');
+      expect(mockState.lastDecision.isClassifier).toBe(true);
+    });
+
     it('should NOT promote tier for images when budget is exceeded (I1)', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
       const stream = new MockEventStream();
@@ -1570,7 +1656,9 @@ describe('provider.ts', () => {
       };
       vi.mocked(readFileSync).mockReturnValue('test-key\n');
       const body = JSON.stringify({
-        answers: { tier: { type: 'choice', choice: 'high', confidence: 0.95 } },
+        answers: {
+          work_type: { type: 'choice', choice: 'planning', confidence: 0.95 },
+        },
       });
       const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => ({
         ok: true,
@@ -1615,7 +1703,7 @@ describe('provider.ts', () => {
       vi.mocked(readFileSync).mockReturnValue('test-key\n');
       const body = JSON.stringify({
         answers: {
-          tier: { type: 'choice', choice: 'gigantic', confidence: 0.9 },
+          work_type: { type: 'choice', choice: 'gigantic', confidence: 0.9 },
         },
       });
       vi.stubGlobal(

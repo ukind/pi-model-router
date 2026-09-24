@@ -757,6 +757,10 @@ export const registerRouterProvider = (
                 if (decision.classifierTier) {
                   promotedDecision.classifierTier = decision.classifierTier;
                 }
+                if (decision.classifierCriterion) {
+                  promotedDecision.classifierCriterion =
+                    decision.classifierCriterion;
+                }
                 if (decision.isClassifier) {
                   promotedDecision.isClassifier = decision.isClassifier;
                 }

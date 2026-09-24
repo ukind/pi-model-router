@@ -17,6 +17,9 @@ import {
   isObjectRecord,
   isThinkingLevel,
   isRouterTier,
+  ROUTER_WORK_TYPES,
+  WORK_TYPE_TO_TIER,
+  isRouterWorkType,
 } from './config';
 import type {
   RouterConfig,
@@ -94,6 +97,31 @@ describe('config.ts', () => {
       expect(isRouterTier('low')).toBe(true);
       expect(isRouterTier('auto')).toBe(false);
       expect(isRouterTier('invalid')).toBe(false);
+    });
+  });
+
+  describe('isRouterWorkType / WORK_TYPE_TO_TIER / ROUTER_WORK_TYPES', () => {
+    it('accepts the five work types', () => {
+      for (const wt of ROUTER_WORK_TYPES) {
+        expect(isRouterWorkType(wt)).toBe(true);
+      }
+    });
+    it('rejects tier words and non-vocabulary strings', () => {
+      // 'planning'/'implementation' also satisfy isRouterPhase — the tier-word
+      // rejections prove THIS guard fired, not the phase guard.
+      expect(isRouterWorkType('high')).toBe(false);
+      expect(isRouterWorkType('medium')).toBe(false);
+      expect(isRouterWorkType('low')).toBe(false);
+      expect(isRouterWorkType('lightweight')).toBe(false);
+      expect(isRouterWorkType('scan_read')).toBe(false);
+      expect(isRouterWorkType(undefined)).toBe(false);
+    });
+    it('maps every work type to the fixed tier targets (FR3)', () => {
+      expect(WORK_TYPE_TO_TIER.planning).toBe('high');
+      expect(WORK_TYPE_TO_TIER.implementation).toBe('medium');
+      expect(WORK_TYPE_TO_TIER.summary).toBe('low');
+      expect(WORK_TYPE_TO_TIER.lookup).toBe('low');
+      expect(WORK_TYPE_TO_TIER.unknown).toBe('medium');
     });
   });
 

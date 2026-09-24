@@ -10,6 +10,7 @@ import {
   isThinkingLevel,
   isObjectRecord,
   isRouterPhase,
+  isRouterWorkType,
 } from './config';
 
 const isValidPinByProfile = (value: unknown): boolean => {
@@ -59,11 +60,12 @@ const isFailureReason = (
  *
  * Required fields (`profile`, `tier`, `timestamp`) reject-whole — returns
  * `undefined` if any are bad. The 6 non-optional RoutingDecision fields
- * declared in `types.ts:70-79` (`phase`, `targetProvider`, `targetModelId`,
- * `targetLabel`, `reasoning`, `thinking`) are defaulted when invalid so the
- * returned value always satisfies the interface (string → `''`, phase →
- * `'implementation'`, thinking → `'medium'`). The 10 optional fields (6
- * boolean flags + 4 classifier/veto provenance) are dropped if invalid.
+ * (`phase`, `targetProvider`, `targetModelId`, `targetLabel`, `reasoning`,
+ * `thinking`) are defaulted when invalid so the returned value always
+ * satisfies the interface (string → `''`, phase → `'implementation'`,
+ * thinking → `'medium'`). The 16 optional fields (6 boolean flags + 10
+ * classifier/veto provenance, including `classifierCriterion`) are dropped
+ * if invalid.
  */
 export const sanitizeRoutingDecisionFields = (
   value: unknown,
@@ -76,9 +78,9 @@ export const sanitizeRoutingDecisionFields = (
   if (typeof value.timestamp !== 'number') return undefined;
 
   // Defaults for ALL 6 non-optional RoutingDecision fields beyond the 3
-  // required ones; the interface (types.ts:70-79) makes them required, so
-  // we must satisfy the literal type. Invalid values get safe defaults;
-  // the 10 optional fields are dropped (not set) if invalid.
+  // required ones; the interface makes them required, so we must satisfy
+  // the literal type. Invalid values get safe defaults; the 16 optional
+  // fields are dropped (not set) if invalid.
   const phase = isRouterPhase(value.phase) ? value.phase : 'implementation';
   const targetProvider = isOptionalString(value.targetProvider)
     ? value.targetProvider
@@ -144,6 +146,9 @@ export const sanitizeRoutingDecisionFields = (
   }
   if (isRouterTier(value.classifierTier)) {
     out.classifierTier = value.classifierTier;
+  }
+  if (isRouterWorkType(value.classifierCriterion)) {
+    out.classifierCriterion = value.classifierCriterion;
   }
   if (
     value.vetoOutcome === 'classifier-wins' ||
@@ -222,6 +227,11 @@ export const isRouterPersistedState = (
       if (!isRouterTier(entry.classifierTier)) return false;
       if (!isRouterTier(entry.finalTier)) return false;
       if (typeof entry.timestamp !== 'number') return false;
+      if (
+        entry.classifierCriterion !== undefined &&
+        !isRouterWorkType(entry.classifierCriterion)
+      )
+        return false;
     }
   }
   return true;

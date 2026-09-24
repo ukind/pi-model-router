@@ -10,6 +10,7 @@ import type {
   ParsedConfigFile,
   RouterTier,
   RouterPhase,
+  RouterWorkType,
   RoutingRule,
   ModelDefinition,
   ClassifierConfig,
@@ -21,6 +22,27 @@ import {
   DEFAULT_STALL_TIMEOUT_MS,
 } from './constants';
 export const ROUTER_TIERS = ['high', 'medium', 'low'] as const;
+
+export const ROUTER_WORK_TYPES = [
+  'planning',
+  'implementation',
+  'summary',
+  'lookup',
+  'unknown',
+] as const;
+
+/**
+ * Deterministic criterion-to-tier map (FR3). The tier follows from the work
+ * type; the confidence floors measure certainty of the work type, never of
+ * the tier. `unknown` never crosses the Jev wire — it is the local fallback.
+ */
+export const WORK_TYPE_TO_TIER: Record<RouterWorkType, RouterTier> = {
+  planning: 'high',
+  implementation: 'medium',
+  summary: 'low',
+  lookup: 'low',
+  unknown: 'medium',
+};
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [
   'off',
@@ -51,6 +73,13 @@ export const isRouterTier = (value: unknown): value is RouterTier =>
 
 export const isRouterPhase = (value: unknown): value is RouterPhase =>
   value === 'planning' || value === 'implementation' || value === 'lightweight';
+
+export const isRouterWorkType = (value: unknown): value is RouterWorkType =>
+  value === 'planning' ||
+  value === 'implementation' ||
+  value === 'summary' ||
+  value === 'lookup' ||
+  value === 'unknown';
 
 export const parseConfigFile = (path: string): ParsedConfigFile => {
   if (!existsSync(path)) {

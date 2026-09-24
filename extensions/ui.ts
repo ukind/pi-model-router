@@ -27,9 +27,20 @@ export const getDecisionFlags = (decision: RoutingDecision): string[] => {
   return flags;
 };
 
+/**
+ * Criterion suffix for tier displays: ` (lookup)` in `Route: low (lookup)`.
+ * Empty when the decision carries no classifier criterion, so
+ * criterion-free decisions render exactly as before (FR11). Pin and
+ * pure-heuristic decisions never carry one. Rule-won, degraded, and
+ * budget-forced decisions can carry one — the suffix is provenance of
+ * what the classifier answered, not a source label.
+ */
+const formatCriterionSuffix = (decision: RoutingDecision): string =>
+  decision.classifierCriterion ? ` (${decision.classifierCriterion})` : '';
+
 export const formatDecision = (decision: RoutingDecision): string => {
   const confidence = decision.confidence ? ` {${decision.confidence}}` : '';
-  return `${decision.profile}: ${decision.tier} -> ${decision.targetProvider}/${decision.targetModelId} [${decision.thinking}] (${decision.reasoning})${confidence}`;
+  return `${decision.profile}: ${decision.tier}${formatCriterionSuffix(decision)} -> ${decision.targetProvider}/${decision.targetModelId} [${decision.thinking}] (${decision.reasoning})${confidence}`;
 };
 
 export const formatPinSummary = (
@@ -104,7 +115,7 @@ export const updateStatus = (
         activeRouterProfile,
         lastDecision,
       );
-      statusText = `router:${activeRouterProfile}${pinLabel} -> ${lastDecision.tier} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`;
+      statusText = `router:${activeRouterProfile}${pinLabel} -> ${lastDecision.tier}${formatCriterionSuffix(lastDecision)} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`;
     } else {
       statusText = `router:${activeRouterProfile}${pinLabel} -> waiting`;
     }
@@ -137,7 +148,7 @@ export const updateStatus = (
     const flagsStr = flags.length > 0 ? ` [${flags.join(',')}]` : '';
 
     widgetLines.push(
-      `Route: ${lastDecision.tier}${flagsStr} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`,
+      `Route: ${lastDecision.tier}${formatCriterionSuffix(lastDecision)}${flagsStr} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`,
       `Phase: ${lastDecision.phase}`,
     );
   } else if (!routerEnabled && lastNonRouterModel) {

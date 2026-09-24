@@ -162,12 +162,18 @@ const routerExtension = (pi: ExtensionAPI) => {
       else if (decision.isFallback) source = 'fallback';
       else if (decision.isPinned) source = 'pin';
       else source = 'heuristic';
+      const criterion =
+        decision.isClassifier && decision.classifierCriterion
+          ? `${decision.classifierCriterion}, `
+          : '';
       const provenance =
         decision.isClassifier && decision.confidenceNumeric !== undefined
-          ? ` (confidence: ${decision.confidenceNumeric.toFixed(2)})`
+          ? ` (${criterion}confidence: ${decision.confidenceNumeric.toFixed(2)})`
           : decision.isClassifier && decision.confidence
-            ? ` (confidence: ${decision.confidence})`
+            ? ` (${criterion}confidence: ${decision.confidence})`
             : '';
+      // notify call line unchanged — provenance now carries the criterion:
+      // `router → openai/gpt-4o-mini [low, classifier] (lookup, confidence: 0.97)`
       lastExtensionContext.ui.notify(
         `router → ${decision.targetProvider}/${decision.targetModelId} [${decision.tier}, ${source}]${provenance}`,
         'info',

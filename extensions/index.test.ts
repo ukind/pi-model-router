@@ -27,6 +27,20 @@ vi.mock('./config', () => ({
   getUnsupportedTiers: (_profile?: unknown, _registry?: unknown) =>
     [] as string[],
   ROUTER_TIERS: ['high', 'medium', 'low'] as const,
+  ROUTER_WORK_TYPES: [
+    'planning',
+    'implementation',
+    'summary',
+    'lookup',
+    'unknown',
+  ] as const,
+  WORK_TYPE_TO_TIER: {
+    planning: 'high',
+    implementation: 'medium',
+    summary: 'low',
+    lookup: 'low',
+    unknown: 'medium',
+  },
   ROUTER_PIN_VALUES: ['auto', 'high', 'medium', 'low'] as const,
   THINKING_LEVELS: [
     'off',
@@ -37,6 +51,12 @@ vi.mock('./config', () => ({
     'xhigh',
   ] as const,
   isRouterTier: (v: unknown) => v === 'high' || v === 'medium' || v === 'low',
+  isRouterWorkType: (v: unknown) =>
+    v === 'planning' ||
+    v === 'implementation' ||
+    v === 'summary' ||
+    v === 'lookup' ||
+    v === 'unknown',
   isRouterPhase: (v: unknown) =>
     v === 'planning' || v === 'implementation' || v === 'lightweight',
   isThinkingLevel: (v: unknown) =>
@@ -797,6 +817,137 @@ describe('index.ts (orchestrator)', () => {
 
       // setModel succeeds (default mock), lastDecision exists => should sync thinking level
       expect(mockPi.setThinkingLevel).toHaveBeenCalledWith('high');
+    });
+
+    it('should restore an old tier-only state unchanged (no criterion fields)', async () => {
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+      mockCtx.sessionManager.getBranch = () => [
+        {
+          type: 'custom',
+          customType: 'router-state',
+          data: {
+            enabled: true,
+            selectedProfile: 'balanced',
+            pinByProfile: {},
+            thinkingByProfile: {},
+            classifierCalibration: [
+              {
+                promptSummary: 'old turn',
+                classifierTier: 'medium',
+                finalTier: 'low',
+                userCorrection: true,
+                timestamp: 1,
+              },
+            ],
+            lastDecision: {
+              profile: 'balanced',
+              tier: 'medium' as const,
+              phase: 'implementation' as const,
+              targetProvider: 'openai',
+              targetModelId: 'gpt-4o-mini',
+              targetLabel: 'openai/gpt-4o-mini',
+              reasoning: 'Classifier: old tier-shaped answer.',
+              thinking: 'medium' as const,
+              timestamp: 1,
+              isClassifier: true,
+              classifierAttempted: true,
+              classifierTier: 'medium' as const,
+            },
+            timestamp: Date.now(),
+          },
+        },
+      ];
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      // The old shape validates, restores, and re-persists without gaining
+      // or losing fields (FR9 dual-shape tolerance).
+      expect(mockPi.appendEntry).toHaveBeenCalledWith(
+        'router-state',
+        expect.objectContaining({
+          classifierCalibration: [
+            expect.objectContaining({
+              classifierTier: 'medium',
+              finalTier: 'low',
+            }),
+          ],
+          lastDecision: expect.objectContaining({
+            classifierTier: 'medium',
+          }),
+        }),
+      );
+      // objectContaining treats an `undefined` sample as a key-presence
+      // check — pin absence with `in` instead.
+      const persisted = mockPi.appendEntry.mock.calls.at(-1)?.[1] as {
+        lastDecision?: Record<string, unknown>;
+      };
+      expect('classifierCriterion' in (persisted?.lastDecision ?? {})).toBe(
+        false,
+      );
+    });
+
+    it('should copy classifierCriterion onto the /router fix calibration entry', async () => {
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+      mockCtx.sessionManager.getBranch = () => [
+        {
+          type: 'custom',
+          customType: 'router-state',
+          data: {
+            enabled: true,
+            selectedProfile: 'balanced',
+            pinByProfile: {},
+            thinkingByProfile: {},
+            lastDecision: {
+              profile: 'balanced',
+              tier: 'low' as const,
+              phase: 'lightweight' as const,
+              targetProvider: 'openai',
+              targetModelId: 'gpt-4o-mini',
+              targetLabel: 'openai/gpt-4o-mini',
+              reasoning: 'Classifier: read-only lookup.',
+              thinking: 'low' as const,
+              timestamp: Date.now(),
+              isClassifier: true,
+              classifierAttempted: true,
+              classifierTier: 'low' as const,
+              classifierCriterion: 'lookup' as const,
+            },
+            timestamp: Date.now(),
+          },
+        },
+      ];
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      const routerCommand = mockPi.registerCommand.mock.calls[0][1];
+      await routerCommand.handler('fix high', mockCtx);
+
+      // The restored criterion survived sanitizeRoutingDecisionFields AND
+      // rode the fix writer onto the calibration entry (FR9 + FR11).
+      expect(mockPi.appendEntry).toHaveBeenCalledWith(
+        'router-state',
+        expect.objectContaining({
+          pinByProfile: expect.objectContaining({ balanced: 'high' }),
+          classifierCalibration: [
+            expect.objectContaining({
+              classifierTier: 'low',
+              classifierCriterion: 'lookup',
+              finalTier: 'high',
+              userCorrection: true,
+            }),
+          ],
+        }),
+      );
     });
   });
 

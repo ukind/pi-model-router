@@ -149,6 +149,65 @@ describe('state.ts', () => {
         }),
       ).toBe(true);
     });
+
+    it('accepts calibration entries carrying a valid classifierCriterion', () => {
+      expect(
+        isRouterPersistedState({
+          enabled: true,
+          selectedProfile: 'x',
+          timestamp: 1,
+          classifierCalibration: [
+            {
+              promptSummary: 'where is the config loader defined',
+              classifierTier: 'low',
+              classifierCriterion: 'lookup',
+              finalTier: 'low',
+              userCorrection: true,
+              timestamp: 1,
+            },
+          ],
+        }),
+      ).toBe(true);
+    });
+
+    it('rejects calibration entries with an invalid classifierCriterion', () => {
+      expect(
+        isRouterPersistedState({
+          enabled: true,
+          selectedProfile: 'x',
+          timestamp: 1,
+          classifierCalibration: [
+            {
+              promptSummary: 'bad shape',
+              classifierTier: 'medium',
+              classifierCriterion: 'gigantic',
+              finalTier: 'high',
+              userCorrection: true,
+              timestamp: 1,
+            },
+          ],
+        }),
+      ).toBe(false);
+    });
+
+    it('accepts old tier-only calibration entries (no criterion)', () => {
+      expect(
+        isRouterPersistedState({
+          enabled: true,
+          selectedProfile: 'x',
+          timestamp: 1,
+          classifierCalibration: [
+            {
+              promptSummary: 'old turn',
+              classifierTier: 'medium',
+              finalTier: 'low',
+              userCorrection: true,
+              timestamp: 1,
+            },
+          ],
+        }),
+      ).toBe(true);
+    });
   });
 
   describe('buildPersistedState', () => {
@@ -367,6 +426,30 @@ describe('state.ts', () => {
       expect(out?.confidence).toBeUndefined();
       expect(out?.vetoReason).toBeUndefined();
       expect(out?.failureReason).toBeUndefined();
+    });
+
+    it('preserves a valid classifierCriterion and drops an invalid one', () => {
+      const valid = sanitizeRoutingDecisionFields({
+        ...minimal,
+        classifierCriterion: 'lookup',
+      });
+      expect(valid?.classifierCriterion).toBe('lookup');
+
+      const invalid = sanitizeRoutingDecisionFields({
+        ...minimal,
+        classifierCriterion: 'gigantic',
+      });
+      expect(invalid?.classifierCriterion).toBeUndefined();
+      expect(invalid?.tier).toBe('high'); // the rest of the decision survives
+    });
+
+    it('keeps old tier-only decisions unchanged (no criterion field)', () => {
+      const out = sanitizeRoutingDecisionFields({
+        ...minimal,
+        classifierTier: 'high',
+      });
+      expect(out?.classifierTier).toBe('high');
+      expect(out?.classifierCriterion).toBeUndefined();
     });
   });
 });

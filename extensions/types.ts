@@ -3,6 +3,13 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 export type RouterTier = 'high' | 'medium' | 'low';
 export type RouterPin = RouterTier | 'auto';
 export type RouterPhase = 'planning' | 'implementation' | 'lightweight';
+// The criterion vocabulary (FR1/FR3)
+export type RouterWorkType =
+  | 'planning'
+  | 'implementation'
+  | 'summary'
+  | 'lookup'
+  | 'unknown';
 export type RouterPinByProfile = Partial<Record<string, RouterTier>>;
 export type RouterThinkingByTier = Partial<Record<RouterTier, ThinkingLevel>>;
 export type RouterThinkingByProfile = Record<string, RouterThinkingByTier>;
@@ -54,6 +61,8 @@ export interface ClassifierPromptContext {
 export interface ClassifierResult {
   /** Absent when the classifier ran but answered unusably (failureReason !== 'success'). */
   tier?: RouterTier;
+  /** Work type the classifier answered, pre-map. Absent on failure results. */
+  workType?: RouterWorkType;
   confidence?: ConfidenceLevel;
   /** Numeric confidence in [0,1] as reported by the backend. The routing gates read this first. */
   confidenceNumeric?: number;
@@ -66,6 +75,8 @@ export interface ClassifierResult {
 export interface ClassifierCalibrationEntry {
   promptSummary: string;
   classifierTier: RouterTier;
+  /** Work type the classifier answered for this calibrated turn, when known. */
+  classifierCriterion?: RouterWorkType;
   finalTier: RouterTier;
   userCorrection?: boolean;
   timestamp: number;
@@ -125,6 +136,7 @@ export interface RoutingDecision {
   vetoReason?: 'explicit-hint';
   classifierAttempted?: boolean;
   classifierTier?: RouterTier;
+  classifierCriterion?: RouterWorkType;
   vetoOutcome?: 'classifier-wins' | 'veto-wins';
   vetoDisagreementMagnitude?: number;
 }

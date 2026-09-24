@@ -29,6 +29,25 @@ describe('ui.ts', () => {
         'balanced: high -> google/gemini-2.5-pro [high] (Exploratory prompts)',
       );
     });
+
+    it('should append the classifier criterion after the tier when present', () => {
+      const decision: RoutingDecision = {
+        profile: 'balanced',
+        tier: 'high',
+        phase: 'planning',
+        targetProvider: 'google',
+        targetModelId: 'gemini-2.5-pro',
+        targetLabel: 'google/gemini-2.5-pro',
+        reasoning: 'Exploratory prompts',
+        thinking: 'high',
+        timestamp: Date.now(),
+        classifierCriterion: 'planning',
+      };
+      const formatted = formatDecision(decision);
+      expect(formatted).toBe(
+        'balanced: high (planning) -> google/gemini-2.5-pro [high] (Exploratory prompts)',
+      );
+    });
   });
 
   describe('formatPinSummary', () => {
@@ -315,6 +334,92 @@ describe('ui.ts', () => {
       const widgetLines = widgetCalls[1];
       expect(widgetLines).toContain(
         '[dim]Pins: balanced:medium, cheap:low[/dim]',
+      );
+    });
+
+    it('should show the criterion in the status line and widget Route line', () => {
+      const ctx = buildMockCtx() as any;
+      const decision: RoutingDecision = {
+        profile: 'balanced',
+        tier: 'low',
+        phase: 'lightweight',
+        targetProvider: 'openai',
+        targetModelId: 'gpt-4o-mini',
+        targetLabel: 'openai/gpt-4o-mini',
+        reasoning: 'Classifier: read-only lookup.',
+        thinking: 'low',
+        timestamp: Date.now(),
+        isClassifier: true,
+        classifierAttempted: true,
+        classifierTier: 'low',
+        classifierCriterion: 'lookup',
+        confidence: 'high',
+      };
+
+      updateStatus(
+        ctx,
+        true,
+        'balanced',
+        {},
+        {},
+        decision,
+        undefined,
+        0,
+        true,
+        mockConfig,
+      );
+
+      expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+        'router',
+        '🚥 router:balanced -> low (lookup) -> openai/gpt-4o-mini (low)',
+      );
+
+      const widgetCalls = ctx.ui.setWidget.mock.calls[0];
+      const widgetLines = widgetCalls[1];
+      expect(widgetLines).toContain(
+        '[dim]Route: low (lookup) [classifier] -> openai/gpt-4o-mini (low)[/dim]',
+      );
+    });
+
+    it('should show the criterion beside a rule-won route as provenance', () => {
+      const ctx = buildMockCtx() as any;
+      const decision: RoutingDecision = {
+        profile: 'balanced',
+        tier: 'medium',
+        phase: 'implementation',
+        targetProvider: 'openai',
+        targetModelId: 'gpt-4o-mini',
+        targetLabel: 'openai/gpt-4o-mini',
+        reasoning: 'rule medium',
+        thinking: 'medium',
+        timestamp: Date.now(),
+        isRuleMatched: true,
+        classifierAttempted: true,
+        classifierTier: 'low',
+        classifierCriterion: 'lookup',
+      };
+
+      updateStatus(
+        ctx,
+        true,
+        'balanced',
+        {},
+        {},
+        decision,
+        undefined,
+        0,
+        true,
+        mockConfig,
+      );
+
+      expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+        'router',
+        '🚥 router:balanced -> medium (lookup) -> openai/gpt-4o-mini (medium)',
+      );
+      const widgetCalls = ctx.ui.setWidget.mock.calls[0];
+      const widgetLines = widgetCalls[1];
+      expect(widgetLines).toContain(
+        '[dim]Route: medium (lookup) [rule,classifier-failed] -> openai/gpt-4o-mini (medium)[/dim]',
       );
     });
 
