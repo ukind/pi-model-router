@@ -1,2 +1,0 @@
-{"runId":"2026-07-25_22-18-58-630b","workflow":"build","input":"currently it seems the classifier model does not have fallback model, add that feature","ts":"2026-07-25T15:18:58.621Z","v":1,"trigger":{"kind":"command","name":"wf"}}
-{"stageNumber":1,"stage":"research","skill":"research","status":"failed","ts":"2026-07-25T15:19:59.983Z","errMsg":"research failed","session":{"id":"019f99db-ad53-7cce-ac2e-90a7c3655ca1","file":"C:\\Users\\utama\\.pi\\agent\\sessions\\--H--fork-pi-model-router--\\2026-07-25T15-18-58-643Z_019f99db-ad53-7cce-ac2e-90a7c3655ca1.jsonl"}}
