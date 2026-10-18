@@ -51,7 +51,6 @@ const isFailureReason = (
 ): v is NonNullable<RoutingDecision['failureReason']> =>
   v === 'success' ||
   v === 'unparseable' ||
-  v === 'json-refused' ||
   v === 'json-invalid' ||
   v === 'infra-failure';
 

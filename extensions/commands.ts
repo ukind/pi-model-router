@@ -29,6 +29,10 @@ import {
 } from './ui';
 import { MAX_CALIBRATION_ENTRIES } from './constants';
 
+// F011: single definitions shared by getThinkingCompletions and
+// handleThinking (previously duplicated per handler with the same values).
+const tierValues = [...ROUTER_TIERS] as string[];
+const levelValues = ['auto', ...THINKING_LEVELS] as string[];
 export const registerCommands = (
   pi: ExtensionAPI,
   state: {
@@ -64,19 +68,62 @@ export const registerCommands = (
   },
 ) => {
   const SUBCOMMAND_DETAILS = [
-    { name: 'status', desc: 'Show current router status' },
-    { name: 'profile', desc: 'Switch to a different router profile' },
-    { name: 'pin', desc: 'Pin routing for a profile to a specific tier' },
-    { name: 'thinking', desc: 'Override thinking level for a tier or profile' },
-    { name: 'disable', desc: 'Disable the router and restore last model' },
+    {
+      name: 'status',
+      desc: 'Show current router status',
+      longDesc:
+        'Show current status, profile, pin, cost, and last decision.',
+    },
+    {
+      name: 'profile',
+      desc: 'Switch to a different router profile',
+      longDesc:
+        'Switch to a profile (enables router if off). Lists available if no name.',
+    },
+    {
+      name: 'pin',
+      desc: 'Pin routing for a profile to a specific tier',
+      longDesc: 'Force a tier (high|medium|low) or set to auto.',
+    },
+    {
+      name: 'thinking',
+      desc: 'Override thinking level for a tier or profile',
+      longDesc:
+        'Override thinking level (off|minimal|...|xhigh|auto). Not all tier models may support every level.',
+    },
+    {
+      name: 'disable',
+      desc: 'Disable the router and restore last model',
+      longDesc:
+        'Disable the router and restore the last used non-router model.',
+    },
     {
       name: 'fix',
       desc: 'Correct the last routing decision and pin that tier',
+      longDesc:
+        'Correct the last routing decision and pin that tier for the current profile.',
     },
-    { name: 'widget', desc: 'Toggle the router status widget' },
-    { name: 'debug', desc: 'Toggle or clear router debug history' },
-    { name: 'reload', desc: 'Reload the model router configuration' },
-    { name: 'help', desc: 'Show usage help for subcommands' },
+    {
+      name: 'widget',
+      desc: 'Toggle the router status widget',
+      longDesc: 'Control the persistent status widget visibility.',
+    },
+    {
+      name: 'debug',
+      desc: 'Toggle or clear router debug history',
+      longDesc:
+        'Control routing debug logging to notifications and history.',
+    },
+    {
+      name: 'reload',
+      desc: 'Reload the model router configuration',
+      longDesc: 'Hot-reload the configuration JSON from .pi/model-router.json.',
+    },
+    {
+      name: 'help',
+      desc: 'Show usage help for subcommands',
+      longDesc: 'Show this help message (also /router ?).',
+    },
   ];
 
   const getSubcommandCompletions = (
@@ -115,9 +162,6 @@ export const registerCommands = (
     args: string[],
   ): AutocompleteItem[] | null => {
     // thinking [tier] <level|auto>
-    const tierValues = [...ROUTER_TIERS];
-    const levelValues = ['auto', ...THINKING_LEVELS];
-
     if (args.length <= 1) {
       const token = args[0] ?? '';
       return [
@@ -145,7 +189,7 @@ export const registerCommands = (
       return null;
     }
 
-    if ((tierValues as string[]).includes(args[0]) || args[0] === 'all') {
+    if (tierValues.includes(args[0]) || args[0] === 'all') {
       const tier = args[0];
       const levelPrefix = args[1] ?? '';
       return levelValues
@@ -257,7 +301,7 @@ export const registerCommands = (
 
     const pinValue = args[0];
 
-    if (!ROUTER_PIN_VALUES.includes(pinValue as any)) {
+    if (!ROUTER_PIN_VALUES.includes(pinValue as RouterTier | 'auto')) {
       ctx.ui.notify(
         `Invalid router pin: ${pinValue}. Use one of: ${ROUTER_PIN_VALUES.join(', ')}`,
         'error',
@@ -312,9 +356,6 @@ export const registerCommands = (
     let tier: RouterTier | 'all' | undefined;
     let levelValue = '';
 
-    const tierValues = ['high', 'medium', 'low'];
-    const levelValues = ['auto', ...THINKING_LEVELS];
-
     if (args.length === 1) {
       levelValue = args[0];
       tier = 'all';
@@ -339,7 +380,8 @@ export const registerCommands = (
       return;
     }
 
-    const nextLevel = levelValue === 'auto' ? undefined : (levelValue as any);
+    const nextLevel =
+      levelValue === 'auto' ? undefined : (levelValue as ThinkingLevel);
     if (tier === 'all') {
       for (const t of ROUTER_TIERS) {
         if (!state.thinkingByProfile[currentProfile])
@@ -659,16 +701,9 @@ export const registerCommands = (
           ctx.ui.notify(
             [
               'Router Subcommands:',
-              '  status                      Show current status, profile, pin, cost, and last decision.',
-              '  profile [name]              Switch to a profile (enables router if off). Lists available if no name.',
-              '  pin <tier|auto>             Force a tier (high|medium|low) or set to auto.',
-              '  thinking [tier] <level>     Override thinking level (off|minimal|...|xhigh|auto). Not all tier models may support every level.',
-              '  disable                     Disable the router and restore the last used non-router model.',
-              '  fix <tier>                  Correct the last routing decision and pin that tier for the current profile.',
-              '  widget <on|off|toggle>      Control the persistent status widget visibility.',
-              '  debug <on|off|show|clear>   Control routing debug logging to notifications and history.',
-              '  reload                      Hot-reload the configuration JSON from .pi/model-router.json.',
-              '  help, ?                     Show this help message.',
+              ...SUBCOMMAND_DETAILS.map(
+                (s) => `  ${s.name.padEnd(28)}${s.longDesc ?? s.desc}`,
+              ),
             ].join('\n'),
             'info',
           );

@@ -12,60 +12,24 @@ import type { Mock } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import {
-  AuthStorage,
   DefaultResourceLoader,
   ExtensionRunner,
-  InMemoryAuthStorageBackend,
   ModelRegistry,
+  ModelRuntime,
   SettingsManager,
 } from '@earendil-works/pi-coding-agent';
-import {
-  streamSimple as extensionCompatStreamSimple,
-  registerApiProvider,
-} from '@earendil-works/pi-ai/compat';
+import { registerApiProvider } from '@earendil-works/pi-ai/compat';
 import type { AssistantMessageEvent, Context } from '@earendil-works/pi-ai';
 
-// Dual compat-instance reality (mirrors production): pi ships pi-ai as a
-// nested node_modules copy inside pi-coding-agent, while this extension
-// resolves its own hoisted copy — two distinct module instances, each with
-// its own apiProviderRegistry. The router registration lands in pi core's
-// instance (ModelRegistry.registerProvider → registerApiProvider), while the
-// router's delegated inner calls dispatch through the extension's instance
-// (whose builtin registrations exist independently at module load). The
-// outer dispatch below must therefore go through pi core's compat instance;
-// the fake provider is additionally registered into the extension's
-// instance so the delegated call resolves. If a future layout flattens the
-// two into one instance, both imports resolve to the same module and the
-// test still holds.
-const extensionCompat = { streamSimple: extensionCompatStreamSimple };
-
-type CompatStreamSimple = typeof extensionCompatStreamSimple;
-let piCompatStreamSimple: CompatStreamSimple = extensionCompatStreamSimple;
-
-// Resolve pi core's compat through pi-coding-agent's package root. The
-// exports map is import-only, so createRequire cannot be used — resolve the
-// file path directly and fall back to the hoisted copy when no nested copy
-// exists (single-instance layout).
-const piAgentEntry = fileURLToPath(
-  import.meta.resolve('@earendil-works/pi-coding-agent'),
-);
-const piAgentRoot = path.dirname(path.dirname(piAgentEntry));
-const nestedCompatPath = path.join(
-  piAgentRoot,
-  'node_modules',
-  '@earendil-works',
-  'pi-ai',
-  'dist',
-  'compat.js',
-);
-if (fs.existsSync(nestedCompatPath)) {
-  const nested = (await import(
-    pathToFileURL(nestedCompatPath).href
-  )) as { streamSimple: CompatStreamSimple };
-  piCompatStreamSimple = nested.streamSimple;
-}
+// pi-coding-agent 1.3.0 layout: pi-ai is hoisted (no nested copy inside
+// pi-coding-agent), and providers registered via ModelRegistry.registerProvider
+// dispatch through ModelRuntime's provider-composer (extension.streamSimple),
+// not through compat's process-global api-map. The outer dispatch below
+// therefore goes through the registry itself. The fake api is additionally
+// registered into compat so the router's delegated inner call (compat
+// streamSimple in provider.ts) resolves it.
 
 // Drives the REAL ordering end to end: DefaultResourceLoader (factory cache
 // via loadExtensionsCached) → ExtensionRunner.bindCore flush → real compat
@@ -124,7 +88,7 @@ const registerFakeProvider = (registry: ModelRegistry) => {
 // scenario: the second loader hits the factory cache (same cwd) and gets a
 // NEW closure over the SAME module instance.
 const worlds: Array<{ cwd: string; agentDir: string }> = [];
-const buildWorld = () => {
+const buildWorld = async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-router-guard-cwd-'));
   const agentDir = fs.mkdtempSync(
     path.join(os.tmpdir(), 'pi-router-guard-agent-'),
@@ -142,8 +106,11 @@ const buildWorld = () => {
       },
     }),
   );
-  const registry = ModelRegistry.inMemory(
-    AuthStorage.fromStorage(new InMemoryAuthStorageBackend()),
+  // pi-coding-agent 1.3.0 removed ModelRegistry.inMemory and the
+  // AuthStorage exports; ModelRuntime.create with modelsPath: null and no
+  // refresh stays hermetic (in-memory models store, agentDir-scoped auth).
+  const registry = new ModelRegistry(
+    await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null }),
   );
   registerFakeProvider(registry);
   const world = { cwd, agentDir, registry };
@@ -189,6 +156,7 @@ const bindRunner = (
       setLabel: vi.fn(),
       getActiveTools: vi.fn(),
       getAllTools: vi.fn(),
+      getSettings: vi.fn(),
       setActiveTools: vi.fn(),
       refreshTools: vi.fn(),
       getCommands: vi.fn(),
@@ -198,6 +166,7 @@ const bindRunner = (
     },
     {
       getModel: () => undefined,
+      getScopedModels: () => [],
       isIdle: () => true,
       isProjectTrusted: () => true,
       getSignal: () => undefined,
@@ -258,12 +227,12 @@ describe('registry guard regression (real resource loader + runner + compat disp
   });
 
   it('pushes the guard error and a router-diagnostic entry when no capture ever happened', async () => {
-    const world = buildWorld();
+    const world = await buildWorld();
     const { appendEntry } = bindRunner(world, await loadExtensionsFor(world));
     // NO events delivered — the residual-window negative control.
 
     const events = await collectStream(
-      piCompatStreamSimple(routerModel(world.registry), streamContext()),
+      world.registry.streamSimple(routerModel(world.registry), streamContext()),
     );
 
     const errors = errorEvents(events);
@@ -279,7 +248,7 @@ describe('registry guard regression (real resource loader + runner + compat disp
   });
 
   it('recovers via the module fallback when the serving closure never received an event', async () => {
-    const world = buildWorld();
+    const world = await buildWorld();
 
     // Session 1: factory executes (closure C1, fresh module instance), the
     // flush registers it, and ONE capture event lands — session_start is
@@ -292,13 +261,14 @@ describe('registry guard regression (real resource loader + runner + compat disp
     // compat api-map entry. ZERO events reach this closure.
     bindRunner(world, await loadExtensionsFor(world));
 
-    // The stream dispatches through compat to the LAST registered closure,
-    // which never captured. The guard must recover via the module fallback
+    // The stream dispatches through the registry to the LAST registered
+    // closure, which never captured. The guard must recover via the module
+    // fallback
     // (written by C1's capture, shared through the cached module) and
     // delegate end-to-end through the fake provider. The write-back also
     // runs against the REAL state bag — a getter-only bag would throw.
     const events = await collectStream(
-      piCompatStreamSimple(routerModel(world.registry), streamContext()),
+      world.registry.streamSimple(routerModel(world.registry), streamContext()),
     );
 
     expect(events.some((e) => e.type === 'text_delta')).toBe(true);
@@ -306,13 +276,13 @@ describe('registry guard regression (real resource loader + runner + compat disp
   });
 
   it('captures on turn_start through the real runner emit path', async () => {
-    const world = buildWorld();
+    const world = await buildWorld();
     const { runner } = bindRunner(world, await loadExtensionsFor(world));
 
     await runner.emit({ type: 'turn_start', turnIndex: 0, timestamp: 0 });
 
     const events = await collectStream(
-      piCompatStreamSimple(routerModel(world.registry), streamContext()),
+      world.registry.streamSimple(routerModel(world.registry), streamContext()),
     );
     expect(errorEvents(events).length).toBe(0);
   });

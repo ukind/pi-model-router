@@ -713,7 +713,7 @@ export const collectProfileThinkingLevels = (
  *
  * @see supportsReasoning (provider.ts)
  */
-const tierSupportsReasoning = (
+export const tierSupportsReasoning = (
   tierConfig: RoutedTierConfig,
   modelRegistry: ExtensionContext['modelRegistry'],
 ): boolean => {

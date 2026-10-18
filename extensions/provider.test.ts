@@ -9,6 +9,7 @@ import {
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
 import type { RouterConfig, RoutingDecision } from './types';
+import { truncateContext } from './truncate';
 
 class MockEventStream {
   events: any[] = [];
@@ -1902,4 +1903,45 @@ describe('provider.ts', () => {
     });
   });
 });
+});
+
+describe('truncateContext (F017)', () => {
+  it('preserves messages[0] and finds the last user message by role', () => {
+    const first = {
+      role: 'user' as const,
+      content: 'a'.repeat(6000),
+      timestamp: 1,
+    };
+    const middle = {
+      role: 'assistant' as const,
+      content: 'b'.repeat(6000),
+      timestamp: 2,
+    };
+    const lastUser = {
+      role: 'user' as const,
+      content: 'c'.repeat(100),
+      timestamp: 3,
+    };
+    const context = {
+      messages: [first, middle, lastUser],
+    } as Parameters<typeof truncateContext>[0];
+
+    const out = truncateContext(context, 2000);
+
+    // The first message is the conversation anchor and is never evicted.
+    expect(out.messages[0]).toBe(first);
+    // The protected tail is the last USER message found by role — not
+    // merely the last message of any role.
+    expect(out.messages[out.messages.length - 1]).toBe(lastUser);
+    expect(out.messages).not.toContain(middle);
+  });
+
+  it('returns the context unchanged when it already fits', () => {
+    const context = {
+      messages: [
+        { role: 'user' as const, content: 'short', timestamp: 1 },
+      ],
+    } as Parameters<typeof truncateContext>[0];
+    expect(truncateContext(context, 10_000)).toBe(context);
+  });
 });

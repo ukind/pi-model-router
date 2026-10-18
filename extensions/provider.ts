@@ -6,8 +6,8 @@ import {
   type Context,
   type Model,
   type SimpleStreamOptions,
-  type Message,
 } from '@earendil-works/pi-ai';
+import type { ThinkingLevel as PiAiThinkingLevel } from '@earendil-works/pi-ai';
 import { streamSimple, getApiProvider } from '@earendil-works/pi-ai/compat';
 import type {
   ExtensionAPI,
@@ -21,7 +21,7 @@ import type {
   RouterPinByProfile,
   RouterThinkingByProfile,
   ClassifierResult,
-  RouterDiagnosticEntry,
+  ModelRuntimeFacade,
 } from './types';
 import {
   profileNames,
@@ -30,6 +30,7 @@ import {
   resolveContextWindow,
   resolveMaxTokens,
   collectProfileThinkingLevels,
+  tierSupportsReasoning,
 } from './config';
 import {
   DEFAULT_CONTEXT_WINDOW,
@@ -50,6 +51,27 @@ import {
   stallGuardedStream,
   isStallTimeoutError,
 } from './routing';
+import {
+  ensureClosureHandle,
+  dispatchRouterStream,
+  modelRegistryFallback,
+  notifyClosureCapture,
+  notifyClosureShutdown,
+  guardRecovery,
+  guardFailure,
+} from './closure';
+import { createErrorMessage, createAbortedMessage, pushAbortedEnd } from './messages';
+import { truncateContext } from './truncate';
+
+// Backward-compatible public surface: index.ts and the test files import
+// these names from './provider'. The implementations now live in the
+// extracted modules.
+export {
+  modelRegistryFallback,
+  notifyClosureCapture,
+  notifyClosureShutdown,
+} from './closure';
+export { createErrorMessage, createAbortedMessage } from './messages';
 
 // Exact pi stale-ctx message prefix (ctx getters throw with this prefix in
 // pi core). Benign classification matches it exactly; pi drift degrades to
@@ -58,363 +80,27 @@ const STALE_CTX_MESSAGE_PREFIX =
   'This extension ctx is stale after session replacement';
 
 
-// ---------------------------------------------------------------------------
-// Cross-session closure dispatcher (phantom-abort fix, 2026-09-09).
-//
-// Root cause it fixes: pi-ai compat's apiProviderRegistry is a PROCESS-GLOBAL
-// map keyed by api id — `registerApiProvider` does `set(api, ...)` so the LAST
-// registration wins for every session in the process. Every in-process
-// subagent session re-executes the factory (pi caches the extension module per
-// cwd) and re-registers 'router-local-api', so after any subagent spawn the
-// child's closure served ALL router streams — including the parent session's.
-// When pi-subagents' 10-minute cleanup timer evicted the child
-// (AgentManager.cleanup → shutdownChildSession → session_shutdown), the child
-// closure flipped its dead flag and the parent's in-flight turn hit the
-// dead-ctx choke, which fabricated a USER-ABORT terminal (stopReason
-// 'aborted' → pi UI renders "Operation aborted") with no Esc pressed. The five
-// turns before it were also corrupted: silently routed by the child's stale
-// state (tier low/flash, decisions persisted into the child's session file).
-//
-// Fix: register ONE stable module-level dispatcher as the compat streamSimple
-// (re-registration overwrites it with an equivalent function — harmless), and
-// have it resolve the serving closure per call. Every closure registers a
-// handle; captureCtx (any event, on the CALLING session's runner) bumps the
-// handle's capture sequence, so at dispatch time the freshest-live handle IS
-// the calling session's closure — turn_start precedes the provider request on
-// every turn (pi core agent-session.js:367-374).
-//
-// ponytail ceiling: with N agents turning CONCURRENTLY, a sibling's turn_start
-// can land between this session's capture and its dispatch, so freshest-live
-// can pick the sibling's closure. Consequence is degraded state attribution
-// only — the dead-flag choke below is signal-only, so no cross-pick can ever
-// fabricate an abort. True session-scoped dispatch needs a pi-core change
-// (compat's registry is keyed by api id, not session).
-// ---------------------------------------------------------------------------
 
-const closureHandles = new Set<RouterClosureHandle>();
-
-interface RouterClosureHandle {
-  /** The per-closure streamSimple built by this factory run. */
-  stream: (
-    model: Model<Api>,
-    context: Context,
-    options?: SimpleStreamOptions,
-  ) => AssistantMessageEventStream;
-  /** Bumped by captureCtx on the owning session's every extension event. */
-  captureSeq: number;
-  /** session_shutdown fired on the owning session — removed from the set. */
-  dead: boolean;
-  /** For forensics: distinguishes closures in stderr/diagnostics. */
-  label: string;
-}
-
-// One handle per factory run (per session that loaded this module), keyed by
-// the per-instance ExtensionAPI object — stable for the closure's lifetime,
-// rebuilt state bags are not. actions.registerRouterProvider() runs multiple
-// times per closure (reloadConfig, switchToRouterProfile) and must reuse it.
-const handleByPi = new WeakMap<ExtensionAPI, RouterClosureHandle>();
-
-const bumpClosureCapture = (pi: ExtensionAPI): void => {
-  const handle = handleByPi.get(pi);
-  if (handle) handle.captureSeq = ++closureCaptureSeq;
-};
-
-const markClosureDead = (pi: ExtensionAPI): void => {
-  const handle = handleByPi.get(pi);
-  if (!handle) return;
-  handle.dead = true;
-  closureHandles.delete(handle);
-};
-let closureCaptureSeq = 0;
-let closureFactorySeq = 0;
-const MAX_CLOSURE_HANDLES = 8;
-
-
-type DispatchProvenance = 'closure:fresh' | 'closure:live-fallback' | 'closure:dead-fallback';
-
-const pickClosureHandle = (): { handle: RouterClosureHandle; provenance: DispatchProvenance } | undefined => {
-  let freshestLive: RouterClosureHandle | undefined;
-  let anyLive: RouterClosureHandle | undefined;
-  let mostRecentAny: RouterClosureHandle | undefined;
-  for (const handle of closureHandles) {
-    if (!mostRecentAny || handle.captureSeq > mostRecentAny.captureSeq) mostRecentAny = handle;
-    if (handle.dead) continue;
-    if (!anyLive) anyLive = handle;
-    if (!freshestLive || handle.captureSeq > freshestLive.captureSeq) freshestLive = handle;
-  }
-  if (freshestLive) return { handle: freshestLive, provenance: 'closure:fresh' };
-  if (anyLive) return { handle: anyLive, provenance: 'closure:live-fallback' };
-  // Dead closure as last resort is safe: every ctx read in the stream path is
-  // dead-guarded and persistState is try/catch — it streams end-to-end with
-  // state writes no-oping. Availability beats a fabricated abort.
-  if (mostRecentAny) return { handle: mostRecentAny, provenance: 'closure:dead-fallback' };
-  return undefined;
-};
-
-let loggedDispatchProvenance = { last: '' };
-const logDispatchProvenance = (provenance: DispatchProvenance, detail: string) => {
-  // One deduped stderr line per distinct provenance class per module instance.
-  // Frequent fresh picks stay silent; the degraded classes are the field signal.
-  if (loggedDispatchProvenance.last === provenance) return;
-  loggedDispatchProvenance.last = provenance;
-  if (provenance === 'closure:fresh') return;
-  console.error(`[pi-model-router] closure dispatcher: ${provenance} (${detail})`);
-};
-
-const dispatchRouterStream = (
-  model: Model<Api>,
-  context: Context,
-  options?: SimpleStreamOptions,
-): AssistantMessageEventStream => {
-  const picked = pickClosureHandle();
-  if (!picked) {
-    // Defensive: unreachable while the module that defines this dispatcher has
-    // ever created a closure, and set-bounding drops only dead handles whose
-    // replacement closure has already registered. Fail loud, never as abort.
-    const stream = createAssistantMessageEventStream();
-    stream.push({
-      type: 'error',
-      reason: 'error',
-      error: createErrorMessage(
-        model,
-        'Router provider has no session closure to serve this stream (all closures dead and none retained). This is a router extension bug — please report it.',
-      ),
-    });
-    stream.end();
-    return stream;
-  }
-  logDispatchProvenance(picked.provenance, `${picked.handle.label}`);
-  return picked.handle.stream(model, context, options);
-};
-
-const ensureClosureHandle = (
-  pi: ExtensionAPI,
-  stream: RouterClosureHandle['stream'],
-  label: string,
-): RouterClosureHandle => {
-  let handle = handleByPi.get(pi);
-  if (handle) {
-    // actions.registerRouterProvider() re-runs per closure (reloadConfig,
-    // switchToRouterProfile) — refresh the stream so a rebuilt state bag is
-    // not served through a stale pre-reload one.
-    handle.stream = stream;
-    return handle;
-  }
-  handle = { stream, captureSeq: ++closureCaptureSeq, dead: false, label };
-  handleByPi.set(pi, handle);
-  closureHandles.add(handle);
-  // Bound the set: reload/subagent churn can leave handles whose sessions were
-  // torn down without an emitted shutdown. Drop dead ones beyond the cap —
-  // a live handle is always kept.
-  if (closureHandles.size > MAX_CLOSURE_HANDLES) {
-    const dead = [...closureHandles].filter((h) => h.dead);
-    while (dead.length > 0 && closureHandles.size > MAX_CLOSURE_HANDLES) {
-      closureHandles.delete(dead.pop()!);
-    }
-  }
-  return handle;
-};
-
-// Exported for index.ts: captureCtx calls this on EVERY delivered event so the
-// calling session's closure is the freshest at dispatch time (turn_start
-// precedes the provider request on every turn). session_shutdown calls the
-// death marker so an evicted subagent's closure is never picked again.
-export const notifyClosureCapture = bumpClosureCapture;
-export const notifyClosureShutdown = markClosureDead;
-
-// Module-level fallback registry. Pi caches the extension module per cwd
-// (loader.js extensionCache): a second session created in this process from
-// fresh services reuses the cached factory, producing a NEW closure over the
-// SAME module instance — that closure can reach streamSimple with no captured
-// registry, and this fallback covers it. In-process subagent sessions
-// (pi-subagents createAgentSession) hit exactly this window: every child
-// re-executes the factory and re-registers the provider into compat's
-// process-global api map, so a stream can dispatch to a fresh closure that
-// never received an extension event. /reload re-evaluates the module
-// (resource-loader clearExtensionCache), so reload windows are covered by
-// capture points (turn_start/session_start) instead; whatever remains is
-// diagnosable via the guard diagnostic.
-export const modelRegistryFallback: {
-  current: ExtensionContext['modelRegistry'] | undefined;
-} = { current: undefined };
-
-const moduleLoadTimeMs = Date.now();
-
-// Guard diagnostics: recovery (module fallback saved the stream) logs one
-// deduped stderr line per module instance — frequent in aliased-closure
-// windows, and the field signal that identifies which window fired. Failure
-// (no capture anywhere in this module instance) also persists a
-// `router-diagnostic` session entry via pi.appendEntry, which works without
-// an extension ctx. Window discrimination at failure time: pid (parent vs
-// child process), uptimeMs (near-zero = first-call window; large =
-// partial-load), argvFlags (TUI vs print-mode flags — flags only, so no user
-// prompt text is persisted; mode itself is unknowable without an extension
-// ctx). (Architecture review L0-01.)
-const loggedGuardRecovery = { moduleFallback: false };
-const logGuardRecovery = () => {
-  if (loggedGuardRecovery.moduleFallback) return;
-  loggedGuardRecovery.moduleFallback = true;
-  console.error(
-    `[pi-model-router] registry guard: recovered via module fallback ` +
-      `(pid=${process.pid}, uptimeMs=${Date.now() - moduleLoadTimeMs}). ` +
-      `The serving closure never received an extension event; ` +
-      `a prior closure's capture supplied the registry.`,
-  );
-};
-const logGuardFailure = (pi: ExtensionAPI, detail: string) => {
-  const diagnostic: RouterDiagnosticEntry = {
-    type: 'registry-guard',
-    provenance: 'none',
-    pid: process.pid,
-    uptimeMs: Date.now() - moduleLoadTimeMs,
-    argvFlags: process.argv
-      .slice(2)
-      .filter((arg) => arg.startsWith('-'))
-      .join(' ')
-      .slice(0, 120),
-    detail,
-  };
-  console.error(
-    `[pi-model-router] registry guard FAILED: no closure capture and no ` +
-      `module fallback (pid=${diagnostic.pid}, uptimeMs=${diagnostic.uptimeMs}, ` +
-      `argvFlags=${diagnostic.argvFlags}, ${diagnostic.detail})`,
-  );
-  try {
-    pi.appendEntry('router-diagnostic', diagnostic);
-  } catch {
-    // ponytail: appendEntry unavailable (pre-bind runtime) — stderr is the trace.
-  }
-};
-
-export const createErrorMessage = (
-  model: Model<Api>,
-  message: string,
-): AssistantMessage => {
-  return {
-    role: 'assistant',
-    content: [],
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: 'error',
-    errorMessage: message,
-    timestamp: Date.now(),
-  };
-};
-
-export const createAbortedMessage = (model: Model<Api>): AssistantMessage => {
-  return {
-    role: 'assistant',
-    content: [],
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: 'aborted',
-    timestamp: Date.now(),
-  };
-};
-
-const pushAbortedEnd = (
-  stream: AssistantMessageEventStream,
-  model: Model<Api>,
-): void => {
-  // Push BEFORE end(): a done/error event — not a bare end() — is what
-  // resolves pi's response.result() (event-stream.js isComplete). Bare
-  // end() parks agent-loop.js:238 forever ("Working..." wedge).
-  stream.push({
-    type: 'error',
-    reason: 'aborted',
-    error: createAbortedMessage(model),
-  });
-  stream.end();
-};
-
-/**
- * Heuristic token estimator (conservative: 3 characters per token)
- */
-const estimateTokens = (text: string): number => Math.ceil(text.length / 3);
-
-/**
- * Truncate context to fit within a target token limit by removing oldest messages.
- * Always preserves the first system message and the latest user message.
- */
-const truncateContext = (context: Context, limit: number): Context => {
-  const messages = [...context.messages];
-  if (messages.length <= 1) return context;
-
-  const getSystemTokens = () =>
-    context.systemPrompt ? estimateTokens(context.systemPrompt) : 0;
-
-  // Initial estimate
-  const totalTokens =
-    getSystemTokens() +
-    messages.reduce(
-      (sum, m) => sum + estimateTokens(extractTextFromContent(m.content)),
-      0,
-    );
-  if (totalTokens <= limit) return context;
-
-  const latestMessage = messages.pop();
-  if (!latestMessage) return context;
-
-  // Collect toolCallIds from a message's content (assistant toolCall parts).
-  const extractToolCallIds = (msg: Message): string[] => {
-    if (!Array.isArray(msg.content)) return [];
-    return msg.content
-      .filter((p) => p.type === 'toolCall' && 'id' in p && p.id)
-      .map((p) => (p as { id: string }).id);
-  };
-
-  // Remove oldest until it fits, preserving toolCall/toolResult pairs.
-  while (messages.length > 0) {
-    const currentTokens =
-      getSystemTokens() +
-      estimateTokens(extractTextFromContent(latestMessage.content)) +
-      messages.reduce(
-        (sum, m) => sum + estimateTokens(extractTextFromContent(m.content)),
-        0,
-      );
-
-    if (currentTokens <= limit) break;
-
-    const evicted = messages.shift();
-    if (evicted) {
-      const toolCallIds = new Set(extractToolCallIds(evicted));
-      if (toolCallIds.size > 0) {
-        // Remove linked toolResult messages so pairs stay together.
-        for (let j = messages.length - 1; j >= 0; j--) {
-          const msg = messages[j];
-          if (
-            msg.role === 'toolResult' &&
-            'toolCallId' in msg &&
-            toolCallIds.has((msg as { toolCallId: string }).toolCallId)
-          ) {
-            messages.splice(j, 1);
-          }
-        }
+const profileSupportsImages = (
+  profile: RouterConfig['profiles'][string],
+  registry: ExtensionContext['modelRegistry'] | undefined,
+): boolean => {
+  // ponytail: no registry = advertise images (existing behavior, avoids
+  // breaking registration before session_start).
+  if (!registry) return true;
+  for (const tier of ROUTER_TIERS) {
+    if (!profile[tier]) continue;
+    const candidates = [profile[tier]!.model, ...(profile[tier]!.fallbacks ?? [])];
+    for (const ref of candidates) {
+      try {
+        const { provider: pp, modelId: mm } = parseCanonicalModelRef(ref);
+        if (registry.find(pp, mm)?.input?.includes('image')) return true;
+      } catch {
+        /* skip invalid */
       }
     }
   }
-
-  const finalMessages: Message[] = [...messages, latestMessage];
-
-  return { ...context, messages: finalMessages };
+  return false;
 };
 
 const supportsReasoning = (
@@ -426,18 +112,47 @@ const supportsReasoning = (
   for (const tier of ROUTER_TIERS) {
     const tierConfig = profile[tier];
     if (!tierConfig) continue;
-    try {
-      const { provider, modelId } = parseCanonicalModelRef(tierConfig.model);
-      if (modelRegistry.find(provider, modelId)?.reasoning) {
-        return true;
-      }
-    } catch (_error) {
-      // ignore invalid model refs here; config normalization handles warnings
+    // F012: delegate to config.tierSupportsReasoning — the same registry
+    // lookup, single-sourced. Superset of the old primary-only check: a
+    // fallback model with reasoning now also advertises it.
+    if (tierSupportsReasoning(tierConfig, modelRegistry)) {
+      return true;
     }
   }
 
   return false;
 };
+
+/**
+ * F015: read the registry's undocumented `runtime` field through a declared
+ * facade instead of an unchecked structural cast. Logs once per mismatch so a
+ * pi internals change is visible in the field instead of silently demoting
+ * the delegated model.
+ */
+const getRuntimeFacade = (
+  registry: ExtensionContext['modelRegistry'] | undefined,
+): ModelRuntimeFacade | undefined => {
+  const runtime = (registry as { runtime?: unknown } | undefined)?.runtime;
+  if (runtime === undefined || runtime === null) return undefined;
+  if (typeof runtime !== 'object') {
+    console.error(
+      `[pi-model-router] registry runtime: expected an object, got ` +
+        `${typeof runtime} — custom-api delegation falls back to compat`,
+    );
+    return undefined;
+  }
+  const facade = runtime as ModelRuntimeFacade;
+  if (typeof facade.streamSimple !== 'function') {
+    console.error(
+      '[pi-model-router] registry runtime: streamSimple is not a function ' +
+        '— custom-api delegation falls back to compat',
+    );
+    return undefined;
+  }
+  return facade;
+};
+
+let closureFactorySeq = 0;
 
 export const registerRouterProvider = (
   pi: ExtensionAPI,
@@ -498,27 +213,6 @@ export const registerRouterProvider = (
         : undefined;
 
     // Honest image advertisement: union of tier model capabilities.
-    const profileSupportsImages = (
-      p: RouterConfig['profiles'][string],
-      registry: ExtensionContext['modelRegistry'] | undefined,
-    ): boolean => {
-      // ponytail: no registry = advertise images (existing behavior, avoids
-      // breaking registration before session_start).
-      if (!registry) return true;
-      for (const tier of ROUTER_TIERS) {
-        if (!p[tier]) continue;
-        const candidates = [p[tier]!.model, ...(p[tier]!.fallbacks ?? [])];
-        for (const ref of candidates) {
-          try {
-            const { provider: pp, modelId: mm } = parseCanonicalModelRef(ref);
-            if (registry.find(pp, mm)?.input?.includes('image')) return true;
-          } catch {
-            /* skip invalid */
-          }
-        }
-      }
-      return false;
-    };
     const supportsImages = profileSupportsImages(
       profile,
       state.currentModelRegistry,
@@ -544,6 +238,14 @@ export const registerRouterProvider = (
         `${m.id}:${m.contextWindow}:${m.maxTokens}:${m.reasoning}:${m.input.join('|')}`,
     )
     .join(',');
+  // F021: this return skips ensureClosureHandle and pi.registerProvider when
+  // the advertised model set is unchanged. That is safe: the module-level
+  // dispatcher (closure.ts) resolves the serving closure per call, and this
+  // pi instance's handle was registered on the first registration. The
+  // refresh ensureClosureHandle would perform is a no-op here because the
+  // closure closes over the same `state` and `actions` object references
+  // (index.ts holds them as module-level lets and mutates in place), so the
+  // already-bound stream reads the current config at dispatch time.
   if (state.lastRegisteredModels === modelsKey) return;
 
   const closureStreamSimple = (
@@ -566,7 +268,7 @@ export const registerRouterProvider = (
       // fail loudly WITHOUT persisting state (nothing meaningful exists to
       // persist) and record a `router-diagnostic` entry. (L1-01/L1-03/L0-01.)
       if (!state.currentModelRegistry && !modelRegistryFallback.current) {
-        logGuardFailure(pi, `api=${model.api} profile=${model.id}`);
+        guardFailure(pi, `api=${model.api} profile=${model.id}`);
         stream.push({
           type: 'error',
           reason: 'error',
@@ -580,7 +282,7 @@ export const registerRouterProvider = (
       }
       if (!state.currentModelRegistry) {
         state.currentModelRegistry = modelRegistryFallback.current;
-        logGuardRecovery();
+        guardRecovery();
       }
 
       (async () => {
@@ -949,7 +651,12 @@ export const registerRouterProvider = (
                   profile,
                   state.currentModelRegistry,
                 );
-                if (targetLimit < model.contextWindow!) {
+                // F016: skip truncation when the advertised context window is
+                // unknown instead of asserting it away.
+                if (
+                  model.contextWindow !== undefined &&
+                  targetLimit < model.contextWindow
+                ) {
                   effectiveContext = truncateContext(context, targetLimit);
                 }
 
@@ -958,13 +665,11 @@ export const registerRouterProvider = (
                   currentTier,
                 );
                 // ponytail: runtime guard excludes 'off'; pi-ai ThinkingLevel excludes 'off', pi-agent-core includes it
-                const delegatedReasoning:
-                  | import('@earendil-works/pi-ai').ThinkingLevel
-                  | undefined =
+                const delegatedReasoning: PiAiThinkingLevel | undefined =
                   targetModel.reasoning &&
                   (thinkingOverride ?? decision.thinking) !== 'off'
                     ? ((thinkingOverride ??
-                        decision.thinking) as import('@earendil-works/pi-ai').ThinkingLevel)
+                        decision.thinking) as PiAiThinkingLevel)
                     : undefined;
 
                 if (
@@ -991,15 +696,12 @@ export const registerRouterProvider = (
                 // ponytail: runtime facade shape is untyped; guard + compat fallback
                 // keeps behavior at least as good as before if pi changes internals.
                 const hasCompatApi = Boolean(getApiProvider(targetModel.api));
-                const registryRuntime = (
-                  state.currentModelRegistry as unknown as {
-                    runtime?: { streamSimple?: typeof streamSimple };
-                  }
-                )?.runtime;
+                const runtimeFacade = getRuntimeFacade(state.currentModelRegistry);
                 // ModelRuntime.streamSimple reads `this.prepareRequest`, so a
                 // detached reference throws and silently demotes the model.
-                const runtimeStreamSimple =
-                  registryRuntime?.streamSimple?.bind(registryRuntime);
+                const runtimeStreamSimple = runtimeFacade?.streamSimple?.bind(
+                  runtimeFacade,
+                );
 
                 const delegatedStream =
                   !hasCompatApi && runtimeStreamSimple

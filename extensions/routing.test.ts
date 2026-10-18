@@ -1434,7 +1434,7 @@ describe('routing.ts', () => {
       expect(result?.failureReason).toBe('success');
     });
 
-    it('returns undefined when the stream answers on the old tier wire', async () => {
+    it('returns a failure-carrying result when the stream answers on the old tier wire (F005)', async () => {
       const mockStream = (async function* () {
         yield {
           type: 'text_delta',
@@ -1447,7 +1447,13 @@ describe('routing.ts', () => {
         mockRegistry,
         context,
       );
-      expect(result).toBeUndefined();
+      // F005: an answer on the old tier wire has no 'Work type:' line, so
+      // it parses as unparseable and propagates as a failure-carrying
+      // ClassifierResult instead of undefined.
+      expect(result).toBeDefined();
+      expect(result?.failureReason).toBe('unparseable');
+      expect(result?.rawText).toBe('Tier: high\nConfidence: high\nReasoning: Deep.');
+      expect(result?.tier).toBeUndefined();
     });
 
     it('returns undefined when all refs fail (model-not-found)', async () => {
@@ -1468,7 +1474,7 @@ describe('routing.ts', () => {
       expect(result).toBeUndefined();
     });
 
-    it('returns undefined when stream yields unparseable output on all refs', async () => {
+    it('returns a failure-carrying result when the stream yields unparseable output (F005)', async () => {
       const mockStream = (async function* () {
         yield { type: 'text_delta', delta: 'Garbage response' };
       })();
@@ -1478,7 +1484,14 @@ describe('routing.ts', () => {
         mockRegistry,
         context,
       );
-      expect(result).toBeUndefined();
+      // F005: the unparseable answer propagates as a failure-carrying
+      // ClassifierResult instead of being dropped to undefined, so
+      // decideRouting can mark classifierAttempted and thread the failure
+      // reason into the decision provenance.
+      expect(result).toBeDefined();
+      expect(result?.failureReason).toBe('unparseable');
+      expect(result?.rawText).toBe('Garbage response');
+      expect(result?.tier).toBeUndefined();
     });
 
     it('retries next ref on infrastructure failure (first missing, second succeeds)', async () => {

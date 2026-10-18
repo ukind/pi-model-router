@@ -6,12 +6,19 @@ The `pi-model-router` is an extension-first model router for the `pi` coding age
 ## Architectural Principles
 - **Extension-First**: All functionality must be implemented as a `pi` extension without modifying `pi` core.
 - **Custom Provider**: Use `pi.registerProvider` to hook into the model lifecycle. The logical model (e.g., `router/auto`) should remain stable while the underlying model changes transparently.
-- **Modularized Design**: Strictly follow the modular structure defined in Phase 3:
+- **Modularized Design**: Strictly follow the modular structure below:
   - `extensions/types.ts`: All interfaces and type definitions.
+  - `extensions/constants.ts`: Shared constants (limits, defaults, classifier floors).
   - `extensions/config.ts`: Configuration loading, normalization, and merging.
   - `extensions/routing.ts`: Core routing logic (heuristics, classifier, rule matching).
+  - `extensions/keywords.ts`: Shared keyword and hint vocabulary for routing and typesafe.
+  - `extensions/watchdog.ts`: Stall-watchdog primitives (timeout race, guarded stream).
   - `extensions/provider.ts`: Custom `router` provider registration and delegation stream.
+  - `extensions/closure.ts`: Cross-session closure dispatcher and registry guard.
+  - `extensions/messages.ts`: Error and aborted message factories.
+  - `extensions/truncate.ts`: Token estimation and context truncation.
   - `extensions/state.ts`: Session-persisted state management and snapshotting.
+  - `extensions/typesafe.ts`: TypeSafe (Jev) classifier backend.
   - `extensions/ui.ts`: UI status line and widget rendering logic.
   - `extensions/commands.ts`: CLI command registrations and completions.
   - `extensions/index.ts`: Main entry point (orchestrator).

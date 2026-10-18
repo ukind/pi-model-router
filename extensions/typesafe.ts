@@ -22,6 +22,13 @@ import {
   parseCanonicalModelRef,
   WORK_TYPE_TO_TIER,
 } from './config';
+import {
+  jevPlanningKeywords,
+  jevLookupKeywords,
+  summaryKeywords,
+  implementationKeywords,
+  explicitLowHints,
+} from './keywords';
 
 export const TYPESAFE_ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
 export const TYPESAFE_DEFAULT_MODEL = 'jev-latest';
@@ -73,33 +80,7 @@ const WORK_TYPE_CRITERIA: Record<WireWorkType, TypesafeCriterion> = {
       'Bounded edits with a known plan, routine implementation, focused single-file debugging, tests and fixes, summaries and formatting, and read-only lookups. A short fix or continue request is not planning even when the project is complex.',
     examples:
       'Design the migration plan for the settings module; analyze why the build is slow across the codebase; weigh two persistence approaches; ultrathink: audit this service for correctness; research the auth flow and propose a redesign.',
-    keywords: [
-      'plan',
-      'planning',
-      'architecture',
-      'design',
-      'tradeoff',
-      'trade-off',
-      'research',
-      'investigate',
-      'root cause',
-      'analyze',
-      'analysis',
-      'migration',
-      'strategy',
-      'compare',
-      'options',
-      'approach',
-      'ultrathink',
-      'think hard',
-      'deep',
-      'thoroughly',
-      'comprehensive',
-      'robust',
-      'best',
-      'highest quality',
-      'step by step',
-    ],
+    keywords: jevPlanningKeywords,
   },
   implementation: {
     covers:
@@ -108,23 +89,7 @@ const WORK_TYPE_CRITERIA: Record<WireWorkType, TypesafeCriterion> = {
       'Open-ended design, planning, or research requests (planning). Summaries, changelogs, formatting, renames, and read-only lookups (summary or lookup).',
     examples:
       'Implement the agreed change in three files; fix this failing test; continue the work; add input validation and update its tests; refactor the config loader per the plan; update the readme to document the new flag.',
-    keywords: [
-      'implement',
-      'code',
-      'fix',
-      'update',
-      'edit',
-      'write',
-      'refactor',
-      'add tests',
-      'patch',
-      'change',
-      'apply',
-      'continue',
-      'resume',
-      'make the changes',
-      'go ahead',
-    ],
+    keywords: implementationKeywords,
   },
   summary: {
     covers:
@@ -133,28 +98,7 @@ const WORK_TYPE_CRITERIA: Record<WireWorkType, TypesafeCriterion> = {
       'Any request that writes or changes code, documentation, or configuration, however small (implementation). Read-only lookups that only locate information (lookup). Design, planning, and analysis work (planning).',
     examples:
       'Summarize this diff; tl;dr of that document; reformat this file; rename this variable everywhere; explain briefly what this function does.',
-    keywords: [
-      'summarize',
-      'summary',
-      'changelog',
-      'recap',
-      'tl;dr',
-      'reformat',
-      'format',
-      'rename',
-      'rewrite',
-      'explain briefly',
-      'fast',
-      'cheap',
-      'quick',
-      'quickly',
-      'brief',
-      'briefly',
-      'one sentence',
-      'one line',
-      'tiny',
-      'small',
-    ],
+    keywords: [...summaryKeywords, ...explicitLowHints],
   },
   lookup: {
     covers:
@@ -163,7 +107,7 @@ const WORK_TYPE_CRITERIA: Record<WireWorkType, TypesafeCriterion> = {
       'Any request that writes or changes code, documentation, or configuration (implementation). Explanations, summaries, and text transforms (summary). Design, planning, and analysis work (planning).',
     examples:
       'Where is the config loader defined; which file exports the map; show me the models that match.',
-    keywords: ['where is', 'which file', 'show me', 'list', 'find', 'grep'],
+    keywords: jevLookupKeywords,
   },
 };
 
@@ -420,12 +364,11 @@ export const runTypesafeClassifier = async (
       // Ran, answered unusably: record the body, then try the next ref.
       lastFailure = 'json-invalid';
       lastRawBody = rawBodyText;
-    } catch (error) {
+    } catch {
       // A mid-run abort means the turn was killed — not a classifier failure.
       if (options.signal?.aborted) return undefined;
       if (stalled) options.onStall?.(ref, options.timeoutMs);
       lastFailure = 'infra-failure';
-      void error;
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', propagateAbort);

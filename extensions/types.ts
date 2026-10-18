@@ -1,7 +1,13 @@
+import type {
+  Api,
+  AssistantMessageEventStream,
+  Context,
+  Model,
+  SimpleStreamOptions,
+} from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 
 export type RouterTier = 'high' | 'medium' | 'low';
-export type RouterPin = RouterTier | 'auto';
 export type RouterPhase = 'planning' | 'implementation' | 'lightweight';
 // The criterion vocabulary (FR1/FR3)
 export type RouterWorkType =
@@ -42,7 +48,6 @@ export type ConfidenceLevel = 'high' | 'medium' | 'low';
 export type ClassifierFailureReason =
   | 'success'
   | 'unparseable'
-  | 'json-refused'
   | 'json-invalid'
   | 'infra-failure';
 
@@ -54,8 +59,6 @@ export interface ClassifierPromptContext {
   multiLinePrompt: boolean;
   currentPhase?: RouterPhase;
   hasImage?: boolean;
-  isBudgetExceeded?: boolean;
-  phaseBias?: number;
 }
 
 export interface ClassifierResult {
@@ -180,4 +183,20 @@ export interface RouterDiagnosticEntry {
   uptimeMs: number;
   argvFlags: string;
   detail: string;
+}
+
+/**
+ * Minimal structural facade for pi's ModelRuntime as reached through the
+ * model registry's `runtime` field. That field is not part of the public
+ * registry type; this interface names the one member the router delegates
+ * through for custom (non-builtin) api ids. Replaces the previous
+ * `as unknown as` cast with a shape-checked read (see getRuntimeFacade in
+ * provider.ts).
+ */
+export interface ModelRuntimeFacade {
+  streamSimple?: (
+    model: Model<Api>,
+    context: Context,
+    options?: SimpleStreamOptions,
+  ) => AssistantMessageEventStream;
 }

@@ -33,12 +33,19 @@ The extension is modularized for maintainability:
 
 - `extensions/index.ts`: Orchestrator. Manages state, hooks into `pi` events, and wires modules together.
 - `extensions/provider.ts`: Implements the `router` provider and the delegation/retry loop.
+- `extensions/closure.ts`: Cross-session closure dispatcher and registry guard (phantom-abort fix).
+- `extensions/messages.ts`: Error and aborted terminal message factories.
+- `extensions/truncate.ts`: Token estimation and context truncation.
 - `extensions/routing.ts`: Core decision logic, heuristics, and the LLM classifier.
+- `extensions/watchdog.ts`: Stall-watchdog primitives shared by the provider and the classifier.
+- `extensions/keywords.ts`: Single source of the keyword and hint vocabulary.
 - `extensions/config.ts`: Loads, merges, and normalizes the JSON configuration.
 - `extensions/commands.ts`: Registers all `/router` subcommands and their autocompletions.
 - `extensions/ui.ts`: Manages the status line and the optional state widget.
 - `extensions/state.ts`: Handles session-persisted state and snapshots.
+- `extensions/typesafe.ts`: TypeSafe (Jev) classifier backend.
 - `extensions/types.ts`: Centralized interface and type definitions.
+- `extensions/constants.ts`: Shared constants (limits, defaults, classifier floors).
 
 ## State & Persistence
 

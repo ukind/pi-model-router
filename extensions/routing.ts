@@ -29,6 +29,29 @@ import {
   CLASSIFIER_DEGRADE_FLOOR,
 } from './constants';
 import { runTypesafeClassifier, buildTypesafeState } from './typesafe';
+import {
+  raceStallTimeout,
+  stallGuardedStream,
+  isStallTimeoutError,
+  createStallTimeoutError,
+} from './watchdog';
+import {
+  explicitHighHints,
+  explicitLowHints,
+  planningKeywords,
+  summaryKeywords,
+  implementationKeywords,
+  lookupKeywords,
+} from './keywords';
+
+// F004 re-export: provider.ts, provider.test.ts, and routing.test.ts import
+// the watchdog primitives from './routing'; keep the surface stable.
+export {
+  raceStallTimeout,
+  stallGuardedStream,
+  isStallTimeoutError,
+  createStallTimeoutError,
+} from './watchdog';
 
 export const extractTextFromContent = (
   content: string | Message['content'],
@@ -352,6 +375,123 @@ export const isLowConfidence = (result: ClassifierResult): boolean =>
     ? result.confidenceNumeric < CLASSIFIER_DEGRADE_FLOOR
     : result.confidence === 'low';
 
+/**
+ * Heuristic work-type classification (F004 extraction). Keyword arms only
+ * (hints preempt, summary beats planning); complexity signals are nudges,
+ * not classify arms. Every non-unknown arm pairs its work type with the
+ * HEAD reasoning string, so outcomes stay identical for identical inputs.
+ * Pure — no I/O, no side effects.
+ */
+export const classifyByHeuristics = (args: {
+  prompt: string;
+  wordCount: number;
+  multiLinePrompt: boolean;
+  toolResultCount: number;
+  recentConversation: string;
+  previousDecision: RoutingDecision | undefined;
+  phaseBias: number;
+}): { workType: RouterWorkType; reasoning: string } => {
+  const {
+    prompt,
+    wordCount,
+    multiLinePrompt,
+    toolResultCount,
+    recentConversation,
+    previousDecision,
+    phaseBias,
+  } = args;
+
+  const highThreshold = Math.max(
+    40,
+    120 - (previousDecision?.phase === 'planning' ? phaseBias * 80 : 0),
+  );
+  const lowThreshold = Math.max(
+    4,
+    12 -
+      (previousDecision?.phase === 'implementation' ||
+      previousDecision?.phase === 'planning'
+        ? phaseBias * 8
+        : 0),
+  );
+
+  let workType: RouterWorkType = 'unknown';
+  let reasoning = 'Defaulted to medium tier for general coding work.';
+
+  if (containsAnyWord(prompt, explicitHighHints)) {
+    workType = 'planning';
+    reasoning =
+      'Detected an explicit request for deeper or higher-quality reasoning.';
+  } else if (containsAnyWord(prompt, explicitLowHints)) {
+    workType = 'summary';
+    reasoning =
+      'Detected an explicit request for a faster or lighter response.';
+  } else if (containsAnyWord(prompt, summaryKeywords)) {
+    workType = 'summary';
+    reasoning = 'Detected summary or lightweight transformation keywords.';
+  } else if (
+    containsAnyWord(prompt, planningKeywords) ||
+    prompt.startsWith('why ')
+  ) {
+    workType = 'planning';
+    reasoning =
+      previousDecision?.phase === 'planning'
+        ? 'Continued planning phase based on complexity or keywords.'
+        : 'Detected planning, broad analysis, or a high-complexity request.';
+  } else if (containsAnyWord(prompt, implementationKeywords)) {
+    workType = 'implementation';
+    reasoning =
+      'Detected implementation-oriented work with bounded execution scope.';
+  } else if (
+    containsAnyWord(prompt, lookupKeywords) &&
+    wordCount <= 24 &&
+    toolResultCount === 0
+  ) {
+    workType = 'lookup';
+    reasoning = 'Detected a short read-only lookup request.';
+  }
+
+  // Complexity nudge (the raise): a long or multi-line turn raises every
+  // classification except summary and planning.
+  if (
+    (wordCount >= highThreshold || multiLinePrompt) &&
+    workType !== 'summary' &&
+    workType !== 'planning'
+  ) {
+    workType = 'planning';
+    reasoning =
+      previousDecision?.phase === 'planning'
+        ? 'Continued planning phase based on complexity or keywords.'
+        : 'Detected planning, broad analysis, or a high-complexity request.';
+  }
+
+  // Unknown-only nudges, in HEAD order: phase bias, then tool/plan context,
+  // then shortness. These never displace a keyword classification.
+  if (workType === 'unknown') {
+    if (
+      previousDecision?.phase === 'planning' &&
+      toolResultCount === 0 &&
+      wordCount > lowThreshold
+    ) {
+      workType = 'planning';
+      reasoning =
+        'Kept the planning-phase bias because the conversation still looks exploratory.';
+    } else if (
+      toolResultCount > 0 ||
+      previousDecision?.phase === 'implementation' ||
+      recentConversation.includes('plan:')
+    ) {
+      workType = 'implementation';
+      reasoning =
+        'Detected active implementation work from prior tools or recent plan execution context.';
+    } else if (wordCount <= lowThreshold) {
+      workType = 'summary';
+      reasoning = 'Detected a short bounded request.';
+    }
+  }
+
+  return { workType, reasoning };
+};
+
 export const decideRouting = (
   context: Context,
   profileName: string,
@@ -370,89 +510,6 @@ export const decideRouting = (
   const toolResultCount = countToolResults(context);
   const wordCount = countWords(prompt);
   const multiLinePrompt = prompt.split('\n').length >= 4;
-
-  const explicitHighHints = [
-    'best',
-    'deep',
-    'deeply',
-    'carefully',
-    'thoroughly',
-    'robust',
-    'comprehensive',
-    'step by step',
-    'think hard',
-    'highest quality',
-    'ultrathink',
-  ];
-  const explicitLowHints = [
-    'fast',
-    'cheap',
-    'quick',
-    'quickly',
-    'brief',
-    'briefly',
-    'one sentence',
-    'one line',
-    'tiny',
-    'small',
-  ];
-  const planningKeywords = [
-    'plan',
-    'planning',
-    'architecture',
-    'architect',
-    'design',
-    'tradeoff',
-    'trade-off',
-    'research',
-    'investigate',
-    'root cause',
-    'analyze',
-    'analysis',
-    'migration',
-    'strategy',
-    'compare',
-    'options',
-    'approach',
-  ];
-  const summaryKeywords = [
-    'summarize',
-    'summary',
-    'changelog',
-    'rewrite',
-    'reformat',
-    'format',
-    'rename',
-    'explain briefly',
-    'recap',
-    'tl;dr',
-  ];
-  const implementationKeywords = [
-    'implement',
-    'code',
-    'fix',
-    'update',
-    'edit',
-    'write',
-    'refactor',
-    'add tests',
-    'patch',
-    'change',
-    'apply',
-    'continue',
-    'resume',
-    'make the changes',
-    'go ahead',
-  ];
-  const lookupKeywords = [
-    'where is',
-    'which file',
-    'show me',
-    'list',
-    'what files',
-    'find',
-    'grep',
-  ];
 
   let phase: RouterPhase = previousDecision?.phase ?? 'implementation';
   let tier: RouterTier = 'medium';
@@ -570,111 +627,24 @@ export const decideRouting = (
 
     if (!isClassifier && !ruleMatch && !pinnedTier) {
       // Heuristic branch (also reached on low-confidence degrade)
-      const highThreshold = Math.max(
-        40,
-        120 - (previousDecision?.phase === 'planning' ? phaseBias * 80 : 0),
-      );
-      const lowThreshold = Math.max(
-        4,
-        12 -
-          (previousDecision?.phase === 'implementation' ||
-          previousDecision?.phase === 'planning'
-            ? phaseBias * 8
-            : 0),
-      );
-
-      // Step 1 — classify: keyword arms only (hints preempt, summary beats
-      // planning). Complexity signals are nudges, not classify arms. Every
-      // non-unknown arm pairs its work type with the HEAD reasoning string,
-      // so outcomes stay identical for identical inputs.
-      let workType: RouterWorkType = 'unknown';
-      let heuristicReasoning = reasoning;
-
-      if (containsAnyWord(prompt, explicitHighHints)) {
-        workType = 'planning';
-        heuristicReasoning =
-          'Detected an explicit request for deeper or higher-quality reasoning.';
-      } else if (containsAnyWord(prompt, explicitLowHints)) {
-        workType = 'summary';
-        heuristicReasoning =
-          'Detected an explicit request for a faster or lighter response.';
-      } else if (containsAnyWord(prompt, summaryKeywords)) {
-        workType = 'summary';
-        heuristicReasoning =
-          'Detected summary or lightweight transformation keywords.';
-      } else if (
-        containsAnyWord(prompt, planningKeywords) ||
-        prompt.startsWith('why ')
-      ) {
-        workType = 'planning';
-        heuristicReasoning =
-          previousDecision?.phase === 'planning'
-            ? 'Continued planning phase based on complexity or keywords.'
-            : 'Detected planning, broad analysis, or a high-complexity request.';
-      } else if (containsAnyWord(prompt, implementationKeywords)) {
-        workType = 'implementation';
-        heuristicReasoning =
-          'Detected implementation-oriented work with bounded execution scope.';
-      } else if (
-        containsAnyWord(prompt, lookupKeywords) &&
-        wordCount <= 24 &&
-        toolResultCount === 0
-      ) {
-        workType = 'lookup';
-        heuristicReasoning = 'Detected a short read-only lookup request.';
-      }
-
-      // Step 2 — complexity nudge (the raise): a long or multi-line turn
-      // raises every classification except summary (HEAD arm order: the
-      // complexity arm sat below summary, above implementation/lookup) and
-      // except planning (nothing to raise; high-hint planning keeps its own
-      // reasoning string).
-      if (
-        (wordCount >= highThreshold || multiLinePrompt) &&
-        workType !== 'summary' &&
-        workType !== 'planning'
-      ) {
-        workType = 'planning';
-        heuristicReasoning =
-          previousDecision?.phase === 'planning'
-            ? 'Continued planning phase based on complexity or keywords.'
-            : 'Detected planning, broad analysis, or a high-complexity request.';
-      }
-
-      // Step 3 — unknown-only nudges, in HEAD order: phase bias, then
-      // tool/plan context, then shortness. These never displace a keyword
-      // classification.
-      if (workType === 'unknown') {
-        if (
-          previousDecision?.phase === 'planning' &&
-          toolResultCount === 0 &&
-          wordCount > lowThreshold
-        ) {
-          workType = 'planning';
-          heuristicReasoning =
-            'Kept the planning-phase bias because the conversation still looks exploratory.';
-        } else if (
-          toolResultCount > 0 ||
-          previousDecision?.phase === 'implementation' ||
-          recentConversation.includes('plan:')
-        ) {
-          workType = 'implementation';
-          heuristicReasoning =
-            'Detected active implementation work from prior tools or recent plan execution context.';
-        } else if (wordCount <= lowThreshold) {
-          workType = 'summary';
-          heuristicReasoning = 'Detected a short bounded request.';
-        }
-      }
+      const heuristic = classifyByHeuristics({
+        prompt,
+        wordCount,
+        multiLinePrompt,
+        toolResultCount,
+        recentConversation,
+        previousDecision,
+        phaseBias,
+      });
 
       // Step 4 — convert through the shared map and apply (FR8). The
       // 'unknown' path keeps tier medium, the previous phase, and the
-      // default reasoning — heuristicReasoning still holds it (FR1).
-      if (workType !== 'unknown') {
-        tier = WORK_TYPE_TO_TIER[workType];
+      // default reasoning (FR1).
+      if (heuristic.workType !== 'unknown') {
+        tier = WORK_TYPE_TO_TIER[heuristic.workType];
         phase = phaseForTier(tier);
       }
-      reasoning = heuristicReasoning;
+      reasoning = heuristic.reasoning;
     }
   }
 
@@ -819,111 +789,6 @@ export const parseClassifierOutput = (
   };
 };
 
-/**
- * Stall-watchdog primitives shared by the provider turn loop (delegated
- * stream + auth) and runClassifier (classifier stream + auth).
- *
- * A wait counts as stalled when no progress arrives within `timeoutMs`.
- * Stalls throw a StallTimeoutError-named error so the existing
- * exception-driven fallback chains advance; aborts throw AbortError-named
- * errors so benign-abort classification stays intact.
- */
-export const createStallTimeoutError = (
-  timeoutMs: number,
-  what: string,
-): Error => {
-  const error = new Error(
-    `${what} stalled after ${timeoutMs}ms with no progress`,
-  );
-  error.name = 'StallTimeoutError';
-  return error;
-};
-
-export const isStallTimeoutError = (
-  error: unknown,
-): error is Error =>
-  error instanceof Error && error.name === 'StallTimeoutError';
-
-/**
- * Race `promise` against an inactivity timer and an abort signal.
- * Losing branches clear the timer and detach the listener, so an
- * abandoned promise never produces an unhandled rejection (safe for
- * total functions like ModelRegistry.getApiKeyAndHeaders).
- */
-export const raceStallTimeout = <T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  signal?: AbortSignal,
-  what = 'Operation',
-): Promise<T> => {
-  return new Promise<T>((resolve, reject) => {
-    if (signal?.aborted) {
-      const abortError = new Error('The operation was aborted');
-      abortError.name = 'AbortError';
-      reject(abortError);
-      return;
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const onAbort = () => {
-      if (timer !== undefined) clearTimeout(timer);
-      const abortError = new Error('The operation was aborted');
-      abortError.name = 'AbortError';
-      reject(abortError);
-    };
-    const cleanup = () => {
-      if (timer !== undefined) clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-    };
-    timer = setTimeout(() => {
-      cleanup();
-      reject(createStallTimeoutError(timeoutMs, what));
-    }, timeoutMs);
-    signal?.addEventListener('abort', onAbort, { once: true });
-    promise.then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (reason) => {
-        cleanup();
-        reject(reason);
-      },
-    );
-  });
-};
-
-/**
- * Wrap an async iterable with a per-event inactivity watchdog.
- * Every yielded event resets the timer; silence for `timeoutMs` invokes
- * `onStall` (cancel the underlying transport) and then throws
- * StallTimeoutError. Abort of `signal` throws an AbortError-named error.
- */
-export const stallGuardedStream = async function* <T>(
-  stream: AsyncIterable<T>,
-  timeoutMs: number,
-  onStall?: () => void,
-  signal?: AbortSignal,
-  what = 'Stream',
-): AsyncGenerator<T> {
-  const iterator = stream[Symbol.asyncIterator]();
-  while (true) {
-    let result: IteratorResult<T>;
-    try {
-      result = await raceStallTimeout(
-        iterator.next(),
-        timeoutMs,
-        signal,
-        what,
-      );
-    } catch (error) {
-      if (isStallTimeoutError(error)) onStall?.();
-      throw error;
-    }
-    if (result.done) return result.value;
-    yield result.value;
-  }
-};
-
 export const runClassifier = async (
   refs: string[],
   modelRegistry: ExtensionContext['modelRegistry'],
@@ -1030,7 +895,18 @@ export const runClassifier = async (
 
       const parsed = parseClassifierOutput(fullText);
       if (parsed.failureReason === 'unparseable') {
-        return undefined;
+        // F005: propagate the failure-carrying result. decideRouting's
+        // `else if (classifierResult)` branch marks classifierAttempted and
+        // threads failureReason into the decision provenance, so the
+        // fallback to heuristics stays visible instead of silently
+        // pretending the classifier never ran. isUsableClassifierResult
+        // gates on failureReason === 'success', so no other consumer
+        // changes.
+        return {
+          reasoning: parsed.reasoning,
+          rawText: fullText,
+          failureReason: 'unparseable',
+        };
       }
 
       const workType = parsed.workType!;
@@ -1048,7 +924,6 @@ export const runClassifier = async (
       if (isStallTimeoutError(error)) {
         onStall?.(ref, timeoutMs);
       }
-      void error;
     } finally {
       signal?.removeEventListener('abort', propagateRefAbort);
     }
