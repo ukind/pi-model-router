@@ -39,8 +39,12 @@
   "scripts": {
     "tsc": "tsc --noEmit",
     "build": "tsc",
-    "prepublishOnly": "npm run tsc",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "probe:work-type": "node scripts/probe-work-type.mjs",
+    "format": "prettier --write extensions",
+    "format:check": "prettier --check extensions",
+    "prepublishOnly": "npm run tsc && npm test"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
@@ -51,6 +55,6 @@
   "devDependencies": {
     "prettier": "^3.8.4",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "vitest": "4.1.11"
   }
 }
