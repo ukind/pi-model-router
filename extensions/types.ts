@@ -200,3 +200,41 @@ export interface ModelRuntimeFacade {
     options?: SimpleStreamOptions,
   ) => AssistantMessageEventStream;
 }
+
+/**
+ * Raw-connection liveness for one stream — one delegated candidate or one
+ * classifier ref. A response-body tap on the request's fetch calls advance()
+ * for every chunk; observed turns true on the first chunk and stays true. The
+ * stall watchdog reads it to tell a live quiet connection from a dead one:
+ * without proof of liveness the deadline stays stallTimeoutMs.
+ */
+export interface StallActivity {
+  /** True once a response-body chunk arrived. Sticky for the stream's life. */
+  readonly observed: boolean;
+  /** Report one response-body chunk. */
+  advance: () => void;
+  /** Register an advance listener; returns the unsubscribe function. */
+  subscribe: (listener: () => void) => () => void;
+}
+
+/**
+ * Per-pull extension of a stream's stall deadline. backstopMs is supplied only
+ * while no parsed event has arrived yet: once the tap has seen a chunk the
+ * watchdog waits it, and re-arms on every later chunk. After the first parsed
+ * event the caller omits it, so the deadline returns to stallTimeoutMs.
+ */
+export interface StallGrace {
+  readonly activity: StallActivity;
+  readonly backstopMs?: number;
+}
+
+/**
+ * The stall verdict error. error.name === 'StallTimeoutError' is a wire
+ * contract. condition names the measured silence source at the moment of the
+ * verdict, so a false stall (live connection, no events) is distinguishable
+ * from a real one (no bytes and no events at all). Absent on waits with no
+ * stream, such as the auth fetch races.
+ */
+export interface StallTimeoutError extends Error {
+  readonly condition?: string;
+}

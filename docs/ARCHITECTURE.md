@@ -37,7 +37,7 @@ The extension is modularized for maintainability:
 - `extensions/messages.ts`: Error and aborted terminal message factories.
 - `extensions/truncate.ts`: Token estimation and context truncation.
 - `extensions/routing.ts`: Core decision logic, heuristics, and the LLM classifier.
-- `extensions/watchdog.ts`: Stall-watchdog primitives shared by the provider and the classifier.
+- `extensions/watchdog.ts`: Stall-watchdog primitives shared by the provider and the classifier. One activity tracker and one fetch tap per stream report raw connection liveness, and the per-pull timer re-arms on both bytes and parsed events.
 - `extensions/keywords.ts`: Single source of the keyword and hint vocabulary.
 - `extensions/config.ts`: Loads, merges, and normalizes the JSON configuration.
 - `extensions/commands.ts`: Registers all `/router` subcommands and their autocompletions.
@@ -58,3 +58,16 @@ The router state is persisted using `pi.appendEntry` with a custom type `router-
 ## Reliability: Fallback Chains
 
 Each tier in a profile can define an optional `fallbacks` list. If the primary model fails (e.g., due to rate limits or provider downtime), the router automatically retries the next model in the chain before surfacing an error to the user.
+
+### Stall Watchdog: Two Signals
+
+Every external wait (delegated stream, classifier stream, auth fetch) races a per-pull inactivity timer and an abort signal. `stallGuardedStream` pulls one value at a time, and `raceStallTimeout` arms the timer for each pull. Expiry rejects a named `StallTimeoutError`, which the fallback chains treat like any other failure. The typesafe classifier backend is the exception: its wait races its own plain `setTimeout` and records an infra failure, never a `StallTimeoutError`.
+
+Two signals reset the clock:
+
+- **Parsed events**: every value the guarded stream yields re-arms the next pull at `stallTimeoutMs`.
+- **Raw connection bytes**: `createTrackingFetch` wraps the request's `fetch` per candidate and reports every response-body chunk to an activity tracker. The wrapper rebuilds only the body; status, headers, backpressure, and cancellation pass through.
+
+Before the first parsed event, a connection that has sent one chunk waits `DEFAULT_STALL_BACKSTOP_MS` (600 000 ms) instead. Every later chunk re-arms that timer. Before any chunk, and after the first parsed event, the deadline is `stallTimeoutMs`. The verdict carries a condition string, and the notify line appends it. The condition is `connection silent` when the connection sent at least one chunk before the verdict, and `stream silent` when it sent none. The adapters in `NO_CUSTOM_FETCH_APIS` (`google-generative-ai`, `google-vertex`) reject a custom fetch, so they run untapped: their deadline stays `stallTimeoutMs`.
+
+The delegated options object keeps the caller's `reasoning` value unless the router's effective thinking level is `off`, so a missing registry reasoning flag no longer turns thinking off.

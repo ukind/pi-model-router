@@ -24,6 +24,8 @@ import {
 } from './config';
 import {
   DEFAULT_STALL_TIMEOUT_MS,
+  DEFAULT_STALL_BACKSTOP_MS,
+  NO_CUSTOM_FETCH_APIS,
   CLASSIFIER_OVERRIDE_FLOOR,
   CLASSIFIER_VETO_FLOOR,
   CLASSIFIER_DEGRADE_FLOOR,
@@ -34,6 +36,8 @@ import {
   stallGuardedStream,
   isStallTimeoutError,
   createStallTimeoutError,
+  createActivityTracker,
+  createTrackingFetch,
 } from './watchdog';
 import {
   explicitHighHints,
@@ -798,7 +802,11 @@ export const runClassifier = async (
   hasImage?: boolean,
   signal?: AbortSignal,
   stallTimeoutMs?: number,
-  onStall?: (ref: string, ms: number) => void,
+  // condition is the watchdog's measured silence source ('connection silent'
+  // when a chunk arrived and no event followed, 'stream silent' when no byte
+  // and no event arrived). It is absent on waits with no stream, so a caller
+  // that ignores it keeps today's wording (D7).
+  onStall?: (ref: string, ms: number, condition?: string) => void,
   backend: ClassifierBackend = 'chat',
 ): Promise<ClassifierResult | undefined> => {
   const timeoutMs = stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
@@ -867,11 +875,24 @@ export const runClassifier = async (
           ? thinking
           : undefined;
 
+      // Liveness for THIS classifier stream: one tracker per ref. The tap
+      // reports every response-body chunk to adapter paths that honour the
+      // supplied fetch, so a model that is thinking — or a connection carrying
+      // only keep-alive frames — is not called stalled there. Api ids whose
+      // adapter rejects a custom fetch get a tracker but no tap, so their
+      // deadline stays stallTimeoutMs; their stall line still names what was
+      // silent, because the tracker never advanced (D6, D7).
+      const activity = createActivityTracker();
+      const tappedFetch = NO_CUSTOM_FETCH_APIS.has(model.api)
+        ? undefined
+        : createTrackingFetch(activity, globalThis.fetch);
+
       const stream = streamSimple(model, classifierContext, {
         apiKey,
         headers,
         signal: refAbort.signal,
         ...(reasoningOption ? { reasoning: reasoningOption } : {}),
+        ...(tappedFetch ? { fetch: tappedFetch } : {}),
       });
       let fullText = '';
       let contentReceived = false;
@@ -881,6 +902,10 @@ export const runClassifier = async (
         () => refAbort.abort(),
         refAbort.signal,
         `classifier ${ref}`,
+        // The pre-first-event window waits the backstop once the tap proves the
+        // connection live; stallGuardedStream drops the backstop itself after
+        // the first parsed event, so the event clock governs from then on (D4).
+        { activity, backstopMs: DEFAULT_STALL_BACKSTOP_MS },
       )) {
         if (event.type === 'error' && !contentReceived) {
           break;
@@ -920,9 +945,10 @@ export const runClassifier = async (
       };
     } catch (error) {
       // Infra failure (invalid ref / auth reject / stall / stream threw) —
-      // try next ref. Stall additionally notifies via the caller's callback.
+      // try next ref. A stall also notifies through the caller's callback,
+      // naming what was silent when the verdict fired.
       if (isStallTimeoutError(error)) {
-        onStall?.(ref, timeoutMs);
+        onStall?.(ref, timeoutMs, error.condition);
       }
     } finally {
       signal?.removeEventListener('abort', propagateRefAbort);

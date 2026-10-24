@@ -1527,6 +1527,291 @@ describe('provider.ts', () => {
       expect(mockState.lastExtensionContext.ui.notify).toHaveBeenCalled();
     });
 
+    it('should name the measured silence on a delegated stall', async () => {
+      mockState.lastExtensionContext.ui.notify = vi.fn();
+      mockState.currentConfig.stallTimeoutMs = 20;
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      vi.mocked(streamSimple).mockImplementation(((model: any) =>
+        (async function* () {
+          if (model.id === 'gpt-4o-mini') {
+            // No byte and no parsed event: the tap stays unobserved, so the
+            // verdict is a stream stall, not a connection stall (D7).
+            await new Promise<void>(() => {});
+          }
+          yield { type: 'text_delta', delta: 'fallback answer' };
+        })()) as any);
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(150);
+
+      const notify = mockState.lastExtensionContext.ui.notify;
+      expect(notify).toHaveBeenCalledWith(
+        expect.stringContaining('stream silent'),
+        'warning',
+      );
+      // The pinned substring the stall-fallback contract relies on.
+      expect(notify.mock.calls[0][0]).toContain('stalled');
+    });
+
+    it('should keep a candidate alive while the connection carries bytes', async () => {
+      mockState.lastExtensionContext.ui.notify = vi.fn();
+      mockState.currentConfig.stallTimeoutMs = 15;
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      const fetchMock = vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start: (controller) => {
+                controller.enqueue(new TextEncoder().encode(': keep-alive\n\n'));
+                controller.close();
+              },
+            }),
+          ),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const attempts: string[] = [];
+      vi.mocked(streamSimple).mockImplementation(((
+        model: any,
+        _ctx: any,
+        opts: any,
+      ) =>
+        (async function* () {
+          attempts.push(model.id);
+          // The tap reports this chunk, so the 15ms event clock is replaced by
+          // the backstop while the model is quiet.
+          const response = await opts.fetch('https://api.test/v1');
+          await response.text();
+          await sleep(80); // 5x the 15ms clock, far under the backstop
+          yield { type: 'text_delta', delta: 'kept alive' };
+        })()) as any);
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(300);
+
+      // Discriminating grace test: drop the grace argument and the 15ms clock
+      // kills the first candidate mid-sleep, so the fallback is tried too and
+      // the tap is read a second time.
+      expect(attempts).toEqual(['gpt-4o-mini']);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(mockState.lastExtensionContext.ui.notify).not.toHaveBeenCalled();
+    });
+
+    it('should name the connection when a live stream goes quiet after its first event', async () => {
+      mockState.lastExtensionContext.ui.notify = vi.fn();
+      mockState.currentConfig.stallTimeoutMs = 15;
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+
+      const fetchMock = vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start: (controller) => {
+                controller.enqueue(new TextEncoder().encode(': keep-alive\n\n'));
+                controller.close();
+              },
+            }),
+          ),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      const attempts: string[] = [];
+      vi.mocked(streamSimple).mockImplementation(((
+        model: any,
+        _ctx: any,
+        opts: any,
+      ) =>
+        (async function* () {
+          attempts.push(model.id);
+          if (model.id !== 'gpt-4o-mini') {
+            yield { type: 'text_delta', delta: 'fallback answer' };
+            return;
+          }
+          const response = await opts.fetch('https://api.test/v1');
+          await response.text(); // the tap observes the connection
+          yield { type: 'text_delta', delta: 'partial' };
+          // No further byte and no further event: the event clock governs now,
+          // and the verdict records that the connection had been alive.
+          await new Promise<void>(() => {});
+        })()) as any);
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(150);
+
+      expect(attempts).toEqual(['gpt-4o-mini', 'gemini-1.5-flash']);
+      const notify = mockState.lastExtensionContext.ui.notify;
+      // Discriminator: without the tap the same stall reads 'stream silent'.
+      expect(notify.mock.calls[0][0]).toContain('connection silent');
+    });
+
+    it('should inject the connection tap into the delegated options', async () => {
+      const seen: any[] = [];
+      vi.mocked(streamSimple).mockImplementation(((
+        _model: any,
+        _ctx: any,
+        opts: any,
+      ) => {
+        seen.push(opts);
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'ok' };
+        })() as any;
+      }) as any);
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      // Sentinel: a global patch would replace this binding.
+      const sentinelFetch = vi.fn();
+      vi.stubGlobal('fetch', sentinelFetch);
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(50);
+
+      expect(seen.length).toBe(1);
+      expect(typeof seen[0]?.fetch).toBe('function');
+      // The tap wraps the global fetch; it never replaces it.
+      expect(globalThis.fetch).toBe(sentinelFetch);
+    });
+
+    it('should leave a Google adapter on its own fetch', async () => {
+      // google-generative-ai.js:36 and google-vertex.js:39 throw when handed a
+      // fetch that is not globalThis.fetch, so the tap is skipped for those api
+      // ids (D6).
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      mockState.currentModelRegistry.find = (
+        provider: string,
+        modelId: string,
+      ) =>
+        provider === 'openai' || provider === 'google'
+          ? {
+              provider,
+              id: modelId,
+              api: 'google-vertex',
+              input: ['text', 'image'],
+            }
+          : undefined;
+
+      const seen: any[] = [];
+      vi.mocked(streamSimple).mockImplementation(((
+        _model: any,
+        _ctx: any,
+        opts: any,
+      ) => {
+        seen.push(opts);
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'ok' };
+        })() as any;
+      }) as any);
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext());
+      await sleep(50);
+
+      // Pins the options shape only: the identity guard lives inside the real
+      // adapter's stream(), which is mocked here. Absence of the key is the
+      // contract the adapter expects.
+      expect(seen.length).toBe(1);
+      expect(Object.hasOwn(seen[0] ?? {}, 'fetch')).toBe(false);
+    });
+
+    it('keeps the caller thinking level when the registry flag is absent', async () => {
+      const seen: any[] = [];
+      vi.mocked(streamSimple).mockImplementation(((
+        _model: any,
+        _ctx: any,
+        opts: any,
+      ) => {
+        seen.push(opts);
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'ok' };
+        })() as any;
+      }) as any);
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      // mockRegistry models carry no `reasoning` flag, so the old recompute
+      // dropped the value and the adapter turned thinking off (D5).
+      const callerOptions: any = { reasoning: 'high' };
+
+      registeredProviderOptions.streamSimple(
+        makeModel(),
+        makeContext(),
+        callerOptions,
+      );
+      await sleep(50);
+
+      expect(seen.length).toBe(1);
+      expect(seen[0]?.reasoning).toBe('high');
+      // No leak: the caller's object is never written to.
+      expect(callerOptions).toEqual({ reasoning: 'high' });
+    });
+
+    it("vetoes the caller thinking level when the router's own level is off", async () => {
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as any,
+      );
+      mockActions.getThinkingOverride = vi.fn().mockReturnValue('off');
+
+      const seen: any[] = [];
+      vi.mocked(streamSimple).mockImplementation(((
+        _model: any,
+        _ctx: any,
+        opts: any,
+      ) => {
+        seen.push(opts);
+        return (async function* () {
+          yield { type: 'text_delta', delta: 'ok' };
+        })() as any;
+      }) as any);
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      registeredProviderOptions.streamSimple(makeModel(), makeContext(), {
+        reasoning: 'high',
+      } as any);
+      await sleep(50);
+
+      expect(seen.length).toBe(1);
+      expect(Object.hasOwn(seen[0] ?? {}, 'reasoning')).toBe(false);
+    });
+
     it('should fall back when the auth fetch stalls', async () => {
       mockState.lastExtensionContext.ui.notify = vi.fn();
       mockState.currentConfig.stallTimeoutMs = 20;

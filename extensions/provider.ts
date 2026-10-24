@@ -36,6 +36,8 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   DEFAULT_STALL_TIMEOUT_MS,
+  DEFAULT_STALL_BACKSTOP_MS,
+  NO_CUSTOM_FETCH_APIS,
 } from './constants';
 import {
   phaseForTier,
@@ -47,10 +49,18 @@ import {
   extractTextFromContent,
   hasImageAttachment,
   getLastUserText,
+} from './routing';
+// D8: the watchdog primitives come straight from their module. The re-export
+// bridge in routing.ts is a compatibility shim whose comment is already stale,
+// and growing it for new code entrenches indirection. No cycle: watchdog.ts
+// imports only types.
+import {
   raceStallTimeout,
   stallGuardedStream,
   isStallTimeoutError,
-} from './routing';
+  createActivityTracker,
+  createTrackingFetch,
+} from './watchdog';
 import {
   ensureClosureHandle,
   dispatchRouterStream,
@@ -336,8 +346,13 @@ export const registerRouterProvider = (
               hasImageAttachment(context), // pass image-present flag
               options?.signal,
               stallTimeoutMs,
-              (ref, ms) => {
-                notifyStall(`classifier ${ref} stalled after ${ms}ms`);
+              (ref, ms, condition) => {
+                // D7: the classifier stops rebuilding the watchdog's text and
+                // appends the measured condition the callback now carries.
+                notifyStall(
+                  `classifier ${ref} stalled after ${ms}ms` +
+                    (condition === undefined ? '' : ` (${condition})`),
+                );
               },
               state.currentConfig.classifierModel.backend,
             );
@@ -664,13 +679,25 @@ export const registerRouterProvider = (
                   model.id,
                   currentTier,
                 );
-                // ponytail: runtime guard excludes 'off'; pi-ai ThinkingLevel excludes 'off', pi-agent-core includes it
+                const routerThinking = thinkingOverride ?? decision.thinking;
+                // D5: caller-first, with the router's 'off' veto kept. pi fills
+                // `reasoning` from the session thinking level (agent.js:307) and
+                // the router sets that same level itself (index.ts:122-129) from
+                // this expression, so the caller's value is normally the router's
+                // own choice — and the old recompute went empty whenever the
+                // target model's registry reasoning flag was missing, which
+                // turned thinking off. The veto is what commit 5d1cff40 protected.
+                //
+                // The value is removed from the spread here and re-added
+                // explicitly below, so the delegated options never carry a value
+                // the veto dropped and the caller's object is never written to.
+                const { reasoning: callerReasoning, ...delegationOptions } =
+                  options ?? {};
                 const delegatedReasoning: PiAiThinkingLevel | undefined =
-                  targetModel.reasoning &&
-                  (thinkingOverride ?? decision.thinking) !== 'off'
-                    ? ((thinkingOverride ??
-                        decision.thinking) as PiAiThinkingLevel)
-                    : undefined;
+                  routerThinking === 'off'
+                    ? undefined
+                    : (callerReasoning ??
+                      (routerThinking as PiAiThinkingLevel));
 
                 if (
                   state.lastExtensionContext &&
@@ -684,9 +711,6 @@ export const registerRouterProvider = (
                     state.lastExtensionContext.ui.setHiddenThinkingLabel?.();
                   }
                 }
-
-                const { reasoning: _piReasoning, ...delegationOptions } =
-                  options ?? {};
 
                 // Custom (non-builtin) api ids — e.g. cliproxyapi-codex-responses —
                 // have no entry in compat's api-registry; compat streamSimple throws
@@ -703,6 +727,16 @@ export const registerRouterProvider = (
                   runtimeFacade,
                 );
 
+                // D6: one liveness tracker per candidate. An api id whose
+                // adapter rejects a custom fetch still gets a tracker, so its
+                // stall line can still name what was silent — but no tap is
+                // injected, so its deadline stays stallTimeoutMs and its
+                // fallback behavior is exactly what it was.
+                const activity = createActivityTracker();
+                const tappedFetch = NO_CUSTOM_FETCH_APIS.has(targetModel.api)
+                  ? undefined
+                  : createTrackingFetch(activity, globalThis.fetch);
+
                 const delegatedStream =
                   !hasCompatApi && runtimeStreamSimple
                     ? runtimeStreamSimple(targetModel, effectiveContext, {
@@ -711,6 +745,7 @@ export const registerRouterProvider = (
                         ...(delegatedReasoning
                           ? { reasoning: delegatedReasoning }
                           : {}),
+                        ...(tappedFetch ? { fetch: tappedFetch } : {}),
                       })
                     : streamSimple(targetModel, effectiveContext, {
                         ...delegationOptions,
@@ -720,6 +755,7 @@ export const registerRouterProvider = (
                         ...(delegatedReasoning
                           ? { reasoning: delegatedReasoning }
                           : {}),
+                        ...(tappedFetch ? { fetch: tappedFetch } : {}),
                       });
 
                 let contentReceived = false;
@@ -729,6 +765,11 @@ export const registerRouterProvider = (
                   () => candidateAbort.abort(),
                   candidateAbort.signal,
                   modelRef,
+                  // D4: the backstop covers only the window before the first
+                  // parsed event, and only once the tap proved the connection
+                  // live. stallGuardedStream drops it itself after the first
+                  // event, so the event clock governs from then on.
+                  { activity, backstopMs: DEFAULT_STALL_BACKSTOP_MS },
                 )) {
                   if (event.type === 'done') {
                     state.accumulatedCost +=

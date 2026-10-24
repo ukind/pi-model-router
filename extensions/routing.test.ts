@@ -1629,6 +1629,148 @@ describe('routing.ts', () => {
       expect(vi.mocked(streamSimple)).not.toHaveBeenCalled();
     });
 
+    describe('connection liveness on the classifier stream', () => {
+      afterEach(() => {
+        vi.unstubAllGlobals();
+      });
+
+      it('injects the connection tap into the classifier request', async () => {
+        vi.mocked(streamSimple).mockClear();
+        vi.mocked(streamSimple).mockImplementation((() =>
+          (async function* () {
+            yield {
+              type: 'text_delta',
+              delta: 'Work type: planning\nReasoning: Deep.',
+            };
+          })()) as any);
+
+        await runClassifier(['openai/gpt-4o'], mockRegistry, context);
+
+        const options = vi.mocked(streamSimple).mock.calls[0]?.[2];
+        expect(typeof options?.fetch).toBe('function');
+      });
+
+      it('leaves a Google adapter on its own fetch', async () => {
+        const googleRegistry = {
+          find: (provider: string, modelId: string) =>
+            provider === 'google-vertex'
+              ? ({
+                  provider,
+                  id: modelId,
+                  api: 'google-vertex',
+                  reasoning: false,
+                } as any)
+              : undefined,
+          getApiKeyAndHeaders: async () => ({
+            ok: true as const,
+            apiKey: 'test-key',
+            headers: {},
+          }),
+        } as any;
+        vi.mocked(streamSimple).mockClear();
+        vi.mocked(streamSimple).mockImplementation((() =>
+          (async function* () {
+            yield {
+              type: 'text_delta',
+              delta: 'Work type: summary\nReasoning: Short.',
+            };
+          })()) as any);
+
+        await runClassifier(
+          ['google-vertex/gemini-pro'],
+          googleRegistry,
+          context,
+        );
+
+        const options = vi.mocked(streamSimple).mock.calls[0]?.[2];
+        // This pins the options shape only: the identity guard lives in the
+        // adapter's stream(), which is mocked here. Absence of the key is
+        // still the contract the adapter expects (D6).
+        expect(options).toBeDefined();
+        expect(Object.hasOwn(options ?? {}, 'fetch')).toBe(false);
+      });
+
+      it('names the measured silence on a classifier stall', async () => {
+        const onStall = vi.fn();
+        vi.mocked(streamSimple).mockImplementation((() =>
+          (async function* () {
+            await new Promise<void>(() => {});
+          })()) as any);
+
+        const result = await runClassifier(
+          ['openai/gpt-4o'],
+          mockRegistry,
+          context,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          15,
+          onStall,
+        );
+
+        expect(result).toBeUndefined();
+        expect(onStall).toHaveBeenCalledWith(
+          'openai/gpt-4o',
+          15,
+          'stream silent',
+        );
+      });
+
+      it('keeps a classifier alive while the connection carries bytes', async () => {
+        vi.mocked(streamSimple).mockClear();
+        const fetchMock = vi.fn(
+          async () =>
+            new Response(
+              new ReadableStream<Uint8Array>({
+                start: (controller) => {
+                  controller.enqueue(
+                    new TextEncoder().encode(': keep-alive\n\n'),
+                  );
+                  controller.close();
+                },
+              }),
+            ),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+        // Discriminating grace test: the 80ms wait is more than 5x the 15ms
+        // event clock, so only the re-armed backstop keeps the first ref
+        // alive. Without the grace argument both refs stall at 15ms, so the
+        // result is undefined and the fallback's tap is read too.
+        vi.mocked(streamSimple).mockImplementation(((
+          model: any,
+          _ctx: any,
+          options: any,
+        ) =>
+          (async function* () {
+            const response = await options.fetch('https://api.test/v1');
+            await response.text();
+            await new Promise<void>((resolve) => setTimeout(resolve, 80));
+            yield {
+              type: 'text_delta',
+              delta:
+                model.id === 'gpt-4o'
+                  ? 'Work type: planning\nConfidence: high\nReasoning: Deep.'
+                  : 'Work type: lookup\nConfidence: high\nReasoning: Short.',
+            };
+          })()) as any);
+
+        const result = await runClassifier(
+          ['openai/gpt-4o', 'google/gemini-flash'],
+          mockRegistry,
+          context,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          15,
+        );
+
+        expect(result?.workType).toBe('planning');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+    });
+
     describe('typesafe (Jev) backend', () => {
       const typesafeContext: Context = {
         messages: [
